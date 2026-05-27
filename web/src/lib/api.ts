@@ -47,6 +47,7 @@ export const api = {
     request<{ token: string }>('POST', '/api/auth/login', { username, password }),
 
   listAgents: (signal?: AbortSignal) => request<Agent[]>('GET', '/api/agents', undefined, signal),
+  createAgent: (name: string) => request<{ agent: Agent; api_key: string }>('POST', '/api/agents', { name }),
   deleteAgent: (id: string) => request<void>('DELETE', `/api/agents/${id}`),
   updateAgent: (id: string) => request<void>('POST', `/api/agents/${id}/update`),
 

@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Language
+
+The application UI is in **English**. All user-facing strings, labels, button text, error messages, toast notifications, and modal copy must be written in English.
+
 ## Commands
 
 ```bash
