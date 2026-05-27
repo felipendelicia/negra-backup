@@ -1,0 +1,24 @@
+# Binaries
+bin/
+*.exe
+*.out
+
+# Environment — never commit real secrets
+.env
+
+# Go build cache
+*.test
+*.prof
+
+# UI build artifacts (embedded into binary, committed intentionally)
+# web/dist  ← intentionally NOT ignored (embedded via go:embed)
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
