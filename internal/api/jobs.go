@@ -163,6 +163,43 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleToggleJob(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	result, err := s.db.Exec(
+		`UPDATE backup_jobs SET enabled=$1, updated_at=$2 WHERE id=$3`,
+		body.Enabled, time.Now(), id,
+	)
+	if err != nil {
+		log.Printf("handleToggleJob: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		respondError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	// Update scheduler: reload job so cron reflects new enabled state
+	if s.sched != nil {
+		var job models.BackupJob
+		if err := s.db.Get(&job, `SELECT * FROM backup_jobs WHERE id=$1`, id); err == nil {
+			_ = s.sched.AddJob(job)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleTriggerJob(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {

@@ -10,35 +10,83 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const consoleHistorySize = 500
+
 // ConsoleHub broadcasts server log lines to WebSocket subscribers.
 // It implements io.Writer so it can be used with log.SetOutput.
+// It keeps a ring buffer of the last consoleHistorySize lines so new
+// subscribers receive recent history immediately on connect.
 type ConsoleHub struct {
-	mu   sync.RWMutex
-	subs map[chan []byte]struct{}
+	mu      sync.RWMutex
+	subs    map[chan []byte]struct{}
+	history [][]byte // ring buffer
+	head    int      // next write position
+	full    bool     // ring has wrapped at least once
 }
 
 func NewConsoleHub() *ConsoleHub {
-	return &ConsoleHub{subs: make(map[chan []byte]struct{})}
+	return &ConsoleHub{
+		subs:    make(map[chan []byte]struct{}),
+		history: make([][]byte, consoleHistorySize),
+	}
 }
 
-// Write implements io.Writer — broadcasts each log line to all subscribers.
+// Write implements io.Writer — appends to history and broadcasts to subscribers.
 func (h *ConsoleHub) Write(p []byte) (int, error) {
 	line := make([]byte, len(p))
 	copy(line, p)
 
-	h.mu.RLock()
+	h.mu.Lock()
+	h.history[h.head] = line
+	h.head = (h.head + 1) % consoleHistorySize
+	if h.head == 0 {
+		h.full = true
+	}
+	subs := make([]chan []byte, 0, len(h.subs))
 	for ch := range h.subs {
+		subs = append(subs, ch)
+	}
+	h.mu.Unlock()
+
+	for _, ch := range subs {
 		select {
 		case ch <- line:
 		default: // drop if subscriber is slow
 		}
 	}
-	h.mu.RUnlock()
 	return len(p), nil
 }
 
+// snapshot returns buffered history lines in order (oldest first).
+func (h *ConsoleHub) snapshot() [][]byte {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	var lines [][]byte
+	if h.full {
+		// wrap: from head to end, then 0 to head
+		for i := h.head; i < consoleHistorySize; i++ {
+			if h.history[i] != nil {
+				lines = append(lines, h.history[i])
+			}
+		}
+		for i := 0; i < h.head; i++ {
+			if h.history[i] != nil {
+				lines = append(lines, h.history[i])
+			}
+		}
+	} else {
+		for i := 0; i < h.head; i++ {
+			if h.history[i] != nil {
+				lines = append(lines, h.history[i])
+			}
+		}
+	}
+	return lines
+}
+
 func (h *ConsoleHub) subscribe() chan []byte {
-	ch := make(chan []byte, 256)
+	ch := make(chan []byte, 512)
 	h.mu.Lock()
 	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
@@ -86,6 +134,14 @@ func (s *Server) handleConsoleWS(w http.ResponseWriter, r *http.Request) {
 
 	ch := s.consoleHub.subscribe()
 	defer s.consoleHub.unsubscribe(ch)
+
+	// Replay history to the new subscriber
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	for _, line := range s.consoleHub.snapshot() {
+		if err := conn.WriteMessage(websocket.TextMessage, line); err != nil {
+			return
+		}
+	}
 
 	// Ping to keep connection alive
 	ticker := time.NewTicker(20 * time.Second)

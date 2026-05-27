@@ -62,6 +62,8 @@ export const api = {
   createJob: (data: CreateJobRequest) => request<BackupJob>('POST', '/api/jobs', data),
   updateJob: (id: string, data: CreateJobRequest) =>
     request<void>('PUT', `/api/jobs/${id}`, data),
+  toggleJob: (id: string, enabled: boolean) =>
+    request<void>('PATCH', `/api/jobs/${id}/toggle`, { enabled }),
   deleteJob: (id: string) => request<void>('DELETE', `/api/jobs/${id}`),
   triggerJob: (id: string) => request<BackupRun>('POST', `/api/jobs/${id}/run`),
 

@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api } from 'src/lib/api'
-import { StatusBadge } from 'src/components/StatusBadge'
 import { ConfirmDialog } from 'src/components/ConfirmDialog'
 import { Button } from 'src/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'src/components/ui/card'
@@ -13,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from 's
 import { Switch } from 'src/components/ui/switch'
 import { cronHumanize } from 'src/lib/utils'
 import { Plus, Trash2, Play, Pencil } from 'lucide-react'
+import { cn } from 'src/lib/utils'
 import type { BackupJob, CreateJobRequest } from 'src/lib/types'
 
 const JOB_TYPES = ['files', 'postgres', 'mysql', 'sqlite', 'mongodb'] as const
@@ -137,6 +137,17 @@ export default function Jobs() {
     onError: (e: Error) => toast.error(`Failed to delete: ${e.message}`),
   })
 
+  const toggleMut = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      api.toggleJob(id, enabled),
+    onSuccess: (_, { id, enabled }) => {
+      qc.invalidateQueries({ queryKey: ['jobs'] })
+      const name = jobs.find(j => j.id === id)?.name ?? 'Job'
+      toast.success(`"${name}" ${enabled ? 'enabled' : 'disabled'}`)
+    },
+    onError: (e: Error) => toast.error(`Failed to toggle: ${e.message}`),
+  })
+
   const triggerMut = useMutation({
     mutationFn: (id: string) => api.triggerJob(id),
     onSuccess: (_, id) => {
@@ -201,7 +212,7 @@ export default function Jobs() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold">Backup Jobs</h2>
+        <h2 className="font-sans font-bold text-2xl tracking-tight">Backup Jobs</h2>
         <Button onClick={openCreate} size="sm">
           <Plus className="h-4 w-4 mr-1" />
           New Job
@@ -209,43 +220,65 @@ export default function Jobs() {
       </div>
 
       <Card>
-        <CardHeader><CardTitle>Jobs</CardTitle></CardHeader>
-        <CardContent>
-          {isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
-          {isError && <p className="text-sm text-destructive">Failed to load data. Please refresh.</p>}
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+            Jobs
+            {jobs.length > 0 && <span className="ml-2 text-xs font-normal normal-case">({jobs.length})</span>}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="px-0">
+          {isLoading && <p className="text-sm text-muted-foreground px-6 py-4">Loading…</p>}
+          {isError   && <p className="text-sm text-destructive px-6 py-4">Failed to load data.</p>}
           {!isLoading && jobs.length === 0 && (
-            <p className="text-sm text-muted-foreground">No jobs yet. Create one to start backing up.</p>
+            <p className="text-sm text-muted-foreground px-6 py-4">No jobs yet. Create one to start backing up.</p>
           )}
-          <div className="space-y-3">
-            {jobs.map(job => {
+          <div>
+            {jobs.map((job, i) => {
               const agent = agents.find(a => a.id === job.agent_id)
-              const dest = storage.find(s => s.id === job.storage_destination_id)
+              const dest  = storage.find(s => s.id === job.storage_destination_id)
+              const toggling = toggleMut.isPending && toggleMut.variables?.id === job.id
               return (
-                <div key={job.id} className="flex items-center justify-between p-3 border rounded-lg">
-                  <div className="flex items-center gap-4 min-w-0">
-                    <StatusBadge status={job.enabled ? 'online' : 'offline'} />
-                    <div className="min-w-0">
-                      <div className="font-medium text-sm truncate">{job.name}</div>
-                      <div className="text-xs text-muted-foreground">
-                        {job.type} · {agent?.name ?? job.agent_id.slice(0, 8)} · {dest?.name ?? '—'} · {cronHumanize(job.schedule_cron)}
-                      </div>
+                <div
+                  key={job.id}
+                  className={cn(
+                    'flex items-center gap-4 px-6 py-3 hover:bg-accent/50 transition-colors group',
+                    i < jobs.length - 1 && 'border-b border-border',
+                  )}
+                >
+                  {/* Enable/disable toggle */}
+                  <Switch
+                    checked={job.enabled}
+                    disabled={toggling}
+                    onCheckedChange={(checked) => toggleMut.mutate({ id: job.id, enabled: checked })}
+                    className="shrink-0"
+                    title={job.enabled ? 'Disable job' : 'Enable job'}
+                  />
+
+                  <div className="flex-1 min-w-0">
+                    <div className={cn('text-sm font-medium truncate', !job.enabled && 'text-muted-foreground')}>
+                      {job.name}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {job.type} · {agent?.name ?? job.agent_id.slice(0, 8)} · {dest?.name ?? '—'} · {cronHumanize(job.schedule_cron)}
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0">
+
+                  <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
                     <Button
                       variant="ghost"
-                      size="icon-sm"
+                      size="icon"
+                      className="h-7 w-7"
                       onClick={() => triggerMut.mutate(job.id)}
                       disabled={triggerMut.isPending}
                       title="Run now"
                     >
-                      <Play className="h-4 w-4 text-green-600" />
+                      <Play className="h-3.5 w-3.5" />
                     </Button>
-                    <Button variant="ghost" size="icon-sm" onClick={() => openEdit(job)}>
-                      <Pencil className="h-4 w-4" />
+                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(job)} title="Edit">
+                      <Pencil className="h-3.5 w-3.5" />
                     </Button>
-                    <Button variant="ghost" size="icon-sm" onClick={() => setDeleteTarget(job)}>
-                      <Trash2 className="h-4 w-4 text-destructive" />
+                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setDeleteTarget(job)} title="Delete">
+                      <Trash2 className="h-3.5 w-3.5 text-destructive" />
                     </Button>
                   </div>
                 </div>
@@ -255,7 +288,8 @@ export default function Jobs() {
         </CardContent>
       </Card>
 
-      <Dialog open={dialogOpen} onOpenChange={(o) => !o && closeDialog()}>
+      <Dialog
+ open={dialogOpen} onOpenChange={(o) => !o && closeDialog()}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{editJob ? 'Edit Job' : 'New Backup Job'}</DialogTitle>

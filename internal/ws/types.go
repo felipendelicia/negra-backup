@@ -16,6 +16,7 @@ const (
 	MsgTypeRunJob      = "run_job"
 	MsgTypeCancelJob   = "cancel_job"
 	MsgTypeUpdateAgent = "update_agent"
+	MsgTypeAgentLog    = "agent_log"
 )
 
 // AgentMessage is sent from agent to server.
@@ -33,6 +34,7 @@ type AgentMessage struct {
 	StoragePath string `json:"storage_path,omitempty"`
 	FileCount   int    `json:"file_count,omitempty"`
 	Error       string `json:"error,omitempty"`
+	Log         string `json:"log,omitempty"`
 }
 
 // ServerMessage is sent from server to agent.

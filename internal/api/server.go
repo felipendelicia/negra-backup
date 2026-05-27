@@ -71,6 +71,7 @@ func NewServerWithStatic(db *sqlx.DB, cfg config.Config) (*Server, *ws.Hub, *ws.
 		wsHandler:  agentHandler,
 		consoleHub: NewConsoleHub(),
 	}
+	agentHandler.SetConsoleWriter(s.consoleHub)
 	s.router = s.buildRouterWithStatic()
 	return s, hub, agentHandler
 }
@@ -150,6 +151,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/jobs", s.handleListJobs)
 		r.Post("/api/jobs", s.handleCreateJob)
 		r.Put("/api/jobs/{id}", s.handleUpdateJob)
+		r.Patch("/api/jobs/{id}/toggle", s.handleToggleJob)
 		r.Delete("/api/jobs/{id}", s.handleDeleteJob)
 		r.Post("/api/jobs/{id}/run", s.handleTriggerJob)
 

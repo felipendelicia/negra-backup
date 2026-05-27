@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -104,6 +106,7 @@ func (a *Agent) connect() error {
 		a.conn = nil
 		a.mu.Unlock()
 		conn.Close()
+		log.SetOutput(os.Stderr) // restore on disconnect
 	}()
 
 	hello := ws.AgentMessage{
@@ -118,6 +121,9 @@ func (a *Agent) connect() error {
 	}
 
 	log.Println("connected to server")
+
+	// Tee local log output → server console via WS
+	log.SetOutput(io.MultiWriter(os.Stderr, &wsLogWriter{agent: a}))
 
 	// Heartbeat goroutine — exits when ctx is cancelled (connect returns)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -322,6 +328,18 @@ func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJ
 		log.Printf("send job_done: %v", err)
 	}
 	log.Printf("job %s completed", job.ID)
+}
+
+// wsLogWriter forwards log lines to the server via agent_log WS messages.
+type wsLogWriter struct{ agent *Agent }
+
+func (w *wsLogWriter) Write(p []byte) (int, error) {
+	line := strings.TrimRight(string(p), "\n")
+	if line == "" {
+		return len(p), nil
+	}
+	_ = w.agent.writeJSON(ws.AgentMessage{Type: ws.MsgTypeAgentLog, Log: line})
+	return len(p), nil
 }
 
 func (a *Agent) sendFailure(runID, errMsg string) {

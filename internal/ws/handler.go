@@ -24,11 +24,19 @@ type FailureNotifier interface {
 	SendFailureAlert(jobName, agentName, runID, errMsg string) error
 }
 
+// ConsoleWriter is implemented by the API ConsoleHub to accept agent log lines.
+type ConsoleWriter interface {
+	Write(p []byte) (int, error)
+}
+
 type AgentHandler struct {
 	hub             *Hub
 	db              *sqlx.DB
 	failureNotifier FailureNotifier
+	consoleWriter   ConsoleWriter
 }
+
+func (h *AgentHandler) SetConsoleWriter(w ConsoleWriter) { h.consoleWriter = w }
 
 func NewAgentHandler(hub *Hub) *AgentHandler {
 	return &AgentHandler{hub: hub, db: hub.db}
@@ -101,6 +109,20 @@ func (h *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *AgentHandler) handleAgentMessage(agentID string, msg AgentMessage) {
 	switch msg.Type {
+	case MsgTypeAgentLog:
+		if h.consoleWriter != nil && msg.Log != "" {
+			// Resolve agent name for the prefix
+			agentName := agentID[:8]
+			if h.db != nil {
+				var name string
+				if err := h.db.QueryRow(`SELECT name FROM agents WHERE id=$1`, agentID).Scan(&name); err == nil {
+					agentName = name
+				}
+			}
+			line := fmt.Sprintf("[agent:%s] %s\n", agentName, msg.Log)
+			h.consoleWriter.Write([]byte(line)) //nolint:errcheck
+		}
+
 	case MsgTypeHeartbeat:
 		if h.db != nil {
 			if _, err := h.db.Exec(`UPDATE agents SET last_seen=NOW() WHERE id=$1`, agentID); err != nil {

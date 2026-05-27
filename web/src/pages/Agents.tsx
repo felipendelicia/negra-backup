@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
+import { ArrowUpCircle } from 'lucide-react'
 import { api } from 'src/lib/api'
 import { StatusBadge } from 'src/components/StatusBadge'
 import { ConfirmDialog } from 'src/components/ConfirmDialog'
@@ -69,6 +70,18 @@ export default function Agents() {
   const [nameError, setNameError] = useState('')
 
   const serverUrl = window.location.origin
+
+  const { data: latestVersion } = useQuery({
+    queryKey: ['gh-latest-version'],
+    queryFn: async () => {
+      const r = await fetch('https://api.github.com/repos/felipendelicia/negra-backup/releases/latest')
+      if (!r.ok) return null
+      const d = await r.json() as { tag_name?: string }
+      return d.tag_name?.replace(/^v/, '') ?? null
+    },
+    staleTime: 10 * 60 * 1000, // 10 min
+    retry: false,
+  })
 
   const { data: agents = [], isLoading, isError } = useQuery({
     queryKey: ['agents'],
@@ -194,7 +207,19 @@ export default function Agents() {
                 >
                   <StatusBadge status={agent.status} className="w-16 shrink-0" />
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium truncate">{agent.name}</div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium truncate">{agent.name}</span>
+                      {latestVersion && agent.version && agent.version !== 'dev' &&
+                        agent.version !== latestVersion && (
+                        <span
+                          className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-400"
+                          title={`Update available: v${latestVersion}`}
+                        >
+                          <ArrowUpCircle className="h-3 w-3" />
+                          v{latestVersion} available
+                        </span>
+                      )}
+                    </div>
                     <div className="text-xs text-muted-foreground">
                       {[agent.os, agent.arch].filter(Boolean).join('/')}
                       {agent.version && ` · v${agent.version}`}
