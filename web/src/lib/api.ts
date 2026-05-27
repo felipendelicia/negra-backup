@@ -48,6 +48,7 @@ export const api = {
 
   listAgents: (signal?: AbortSignal) => request<Agent[]>('GET', '/api/agents', undefined, signal),
   deleteAgent: (id: string) => request<void>('DELETE', `/api/agents/${id}`),
+  updateAgent: (id: string) => request<void>('POST', `/api/agents/${id}/update`),
 
   listStorage: (signal?: AbortSignal) => request<StorageDestination[]>('GET', '/api/storage-destinations', undefined, signal),
   createStorage: (data: CreateStorageRequest) =>

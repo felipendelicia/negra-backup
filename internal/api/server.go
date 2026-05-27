@@ -140,6 +140,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/api/agents", s.handleListAgents)
 		r.Post("/api/agents", s.handleCreateAgent)
 		r.Delete("/api/agents/{id}", s.handleDeleteAgent)
+		r.Post("/api/agents/{id}/update", s.handleUpdateAgent)
 
 		r.Get("/api/storage-destinations", s.handleListStorage)
 		r.Post("/api/storage-destinations", s.handleCreateStorage)

@@ -80,6 +80,33 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	// Verify agent exists
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE id=$1`, id).Scan(&count); err != nil || count == 0 {
+		respondError(w, http.StatusNotFound, "agent not found")
+		return
+	}
+
+	if s.hub == nil || !s.hub.IsConnected(id.String()) {
+		respondError(w, http.StatusConflict, "agent is not online")
+		return
+	}
+
+	if !s.hub.UpdateAgent(id.String()) {
+		respondError(w, http.StatusInternalServerError, "failed to send update signal")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // generateAPIKey creates a random 32-byte hex API key and its bcrypt hash.
 func generateAPIKey() (plaintext, hash string, err error) {
 	raw := make([]byte, 32)

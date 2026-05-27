@@ -181,6 +181,14 @@ func (a *Agent) connect() error {
 				cancel()
 			}
 			a.runCtxsMu.Unlock()
+
+		case ws.MsgTypeUpdateAgent:
+			log.Println("update requested by server")
+			go func() {
+				if err := selfUpdate(); err != nil {
+					log.Printf("self-update failed: %v", err)
+				}
+			}()
 		}
 	}
 }

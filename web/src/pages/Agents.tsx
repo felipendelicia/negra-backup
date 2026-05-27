@@ -6,12 +6,15 @@ import { ConfirmDialog } from 'src/components/ConfirmDialog'
 import { Button } from 'src/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'src/components/ui/card'
 import { formatRelative } from 'src/lib/utils'
-import { Trash2 } from 'lucide-react'
+import { Trash2, RefreshCw } from 'lucide-react'
+import { cn } from 'src/lib/utils'
 import type { Agent } from 'src/lib/types'
 
 export default function Agents() {
   const qc = useQueryClient()
   const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null)
+  const [updatingId, setUpdatingId] = useState<string | null>(null)
+  const [updatedIds, setUpdatedIds] = useState<Set<string>>(new Set())
 
   const { data: agents = [], isLoading, isError } = useQuery({
     queryKey: ['agents'],
@@ -27,40 +30,100 @@ export default function Agents() {
     },
   })
 
+  const updateMut = useMutation({
+    mutationFn: (id: string) => api.updateAgent(id),
+    onMutate: (id) => setUpdatingId(id),
+    onSuccess: (_, id) => {
+      setUpdatingId(null)
+      setUpdatedIds(prev => new Set(prev).add(id))
+      // After 4 s the agent reconnects — refetch
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ['agents'] })
+        setUpdatedIds(prev => { const s = new Set(prev); s.delete(id); return s })
+      }, 4_000)
+    },
+    onError: (_, id) => {
+      setUpdatingId(null)
+      setUpdatedIds(prev => { const s = new Set(prev); s.delete(id); return s })
+    },
+  })
+
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold">Agents</h2>
+      <h2 className="font-sans font-bold text-2xl tracking-tight">Agents</h2>
+
       <Card>
-        <CardHeader>
-          <CardTitle>Registered Agents</CardTitle>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+            Registered Agents
+            {agents.length > 0 && (
+              <span className="ml-2 text-xs font-normal normal-case">({agents.length})</span>
+            )}
+          </CardTitle>
         </CardHeader>
-        <CardContent>
-          {isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
-          {isError && <p className="text-sm text-destructive">Failed to load data. Please refresh.</p>}
+        <CardContent className="px-0">
+          {isLoading && <p className="text-sm text-muted-foreground px-6 py-4">Loading…</p>}
+          {isError   && <p className="text-sm text-destructive px-6 py-4">Failed to load data.</p>}
           {!isLoading && agents.length === 0 && (
-            <p className="text-sm text-muted-foreground">No agents registered yet. Install the negra-backup-agent on your machines.</p>
+            <p className="text-sm text-muted-foreground px-6 py-4">
+              No agents registered yet. Install the negra-backup-agent on your machines.
+            </p>
           )}
-          <div className="space-y-3">
-            {agents.map(agent => (
-              <div key={agent.id} className="flex items-center justify-between p-3 border rounded-lg">
-                <div className="flex items-center gap-4">
-                  <StatusBadge status={agent.status} />
-                  <div>
-                    <div className="font-medium text-sm">{agent.name}</div>
+          <div>
+            {agents.map((agent, i) => {
+              const isUpdating = updatingId === agent.id
+              const justSent  = updatedIds.has(agent.id)
+
+              return (
+                <div
+                  key={agent.id}
+                  className={cn(
+                    'flex items-center gap-4 px-6 py-3 hover:bg-accent/50 transition-colors group',
+                    i < agents.length - 1 && 'border-b border-border',
+                  )}
+                >
+                  <StatusBadge status={agent.status} className="w-16 shrink-0" />
+
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium truncate">{agent.name}</div>
                     <div className="text-xs text-muted-foreground">
-                      {agent.os}/{agent.arch} · v{agent.version} · seen {formatRelative(agent.last_seen)}
+                      {[agent.os, agent.arch].filter(Boolean).join('/')}
+                      {agent.version && ` · v${agent.version}`}
+                      {agent.last_seen && ` · seen ${formatRelative(agent.last_seen)}`}
                     </div>
                   </div>
+
+                  {/* Update button — only for online agents */}
+                  {agent.status === 'online' && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className={cn(
+                        'h-7 gap-1.5 text-xs opacity-0 group-hover:opacity-100 transition-all text-muted-foreground hover:text-foreground',
+                        (isUpdating || justSent) && 'opacity-100',
+                        justSent && 'text-emerald-600 dark:text-emerald-400',
+                      )}
+                      onClick={() => updateMut.mutate(agent.id)}
+                      disabled={isUpdating || justSent}
+                      title="Download latest release and restart agent"
+                    >
+                      <RefreshCw className={cn('h-3.5 w-3.5', isUpdating && 'animate-spin')} />
+                      {justSent ? 'Updating…' : 'Update'}
+                    </Button>
+                  )}
+
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
+                    onClick={() => setDeleteTarget(agent)}
+                    title="Remove agent"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                  </Button>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => setDeleteTarget(agent)}
-                >
-                  <Trash2 className="h-4 w-4 text-destructive" />
-                </Button>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </CardContent>
       </Card>

@@ -121,6 +121,23 @@ func (h *Hub) DispatchJob(agentID, runID string, job models.BackupJob, storageTy
 	}
 }
 
+// UpdateAgent sends an update_agent message to the specified agent.
+func (h *Hub) UpdateAgent(agentID string) bool {
+	h.mu.RLock()
+	ac, ok := h.agents[agentID]
+	h.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	data, _ := json.Marshal(ServerMessage{Type: MsgTypeUpdateAgent})
+	select {
+	case ac.send <- data:
+		return true
+	default:
+		return false
+	}
+}
+
 // CancelJob sends a cancel_job message to the agent running the given run.
 // Returns false if the agent is not connected.
 func (h *Hub) CancelJob(agentID, runID string) bool {
