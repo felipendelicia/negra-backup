@@ -121,6 +121,28 @@ func (h *Hub) DispatchJob(agentID, runID string, job models.BackupJob, storageTy
 	}
 }
 
+// CancelJob sends a cancel_job message to the agent running the given run.
+// Returns false if the agent is not connected.
+func (h *Hub) CancelJob(agentID, runID string) bool {
+	h.mu.RLock()
+	ac, ok := h.agents[agentID]
+	h.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	msg := ServerMessage{
+		Type:  MsgTypeCancelJob,
+		RunID: runID,
+	}
+	data, _ := json.Marshal(msg)
+	select {
+	case ac.send <- data:
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *Hub) BroadcastRunLog(runID, line string) {
 	h.logMu.RLock()
 	subs := make([]chan string, len(h.logSubs[runID]))

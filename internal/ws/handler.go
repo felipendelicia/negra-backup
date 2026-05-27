@@ -126,6 +126,11 @@ func (h *AgentHandler) handleAgentMessage(agentID string, msg AgentMessage) {
 
 	case MsgTypeJobFailed:
 		if h.db != nil {
+			// Skip update if already cancelled by user
+			var currentStatus string
+			if err := h.db.QueryRow(`SELECT status FROM backup_runs WHERE id=$1`, msg.RunID).Scan(&currentStatus); err == nil && currentStatus == "cancelled" {
+				break
+			}
 			if _, err := h.db.Exec(`
 				UPDATE backup_runs SET status='failed', finished_at=NOW(), error_message=$1
 				WHERE id=$2`,

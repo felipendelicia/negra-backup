@@ -50,7 +50,7 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	agent := &Agent{cfg: cfg}
+	agent := &Agent{cfg: cfg, runCtxs: make(map[string]context.CancelFunc)}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -72,9 +72,11 @@ func main() {
 
 // Agent holds the running agent state.
 type Agent struct {
-	cfg  agentInternal.AgentConfig
-	mu   sync.Mutex
-	conn *websocket.Conn
+	cfg       agentInternal.AgentConfig
+	mu        sync.Mutex
+	conn      *websocket.Conn
+	runCtxsMu sync.Mutex
+	runCtxs   map[string]context.CancelFunc
 }
 
 func (a *Agent) writeJSON(v any) error {
@@ -155,13 +157,35 @@ func (a *Agent) connect() error {
 			continue
 		}
 
-		if msg.Type == ws.MsgTypeRunJob && msg.Job != nil {
-			go a.executeJob(msg.RunID, *msg.Job, msg.StorageType, msg.StorageConfig, msg.Passphrase)
+		switch msg.Type {
+		case ws.MsgTypeRunJob:
+			if msg.Job != nil {
+				ctx, cancel := context.WithCancel(context.Background())
+				a.runCtxsMu.Lock()
+				a.runCtxs[msg.RunID] = cancel
+				a.runCtxsMu.Unlock()
+				go func() {
+					defer func() {
+						a.runCtxsMu.Lock()
+						delete(a.runCtxs, msg.RunID)
+						a.runCtxsMu.Unlock()
+						cancel()
+					}()
+					a.executeJob(ctx, msg.RunID, *msg.Job, msg.StorageType, msg.StorageConfig, msg.Passphrase)
+				}()
+			}
+		case ws.MsgTypeCancelJob:
+			a.runCtxsMu.Lock()
+			if cancel, ok := a.runCtxs[msg.RunID]; ok {
+				log.Printf("cancelling run %s", msg.RunID)
+				cancel()
+			}
+			a.runCtxsMu.Unlock()
 		}
 	}
 }
 
-func (a *Agent) executeJob(runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage, passphrase string) {
+func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage, passphrase string) {
 	log.Printf("executing job %s (run %s)", job.ID, runID)
 
 	var err error
@@ -182,6 +206,9 @@ func (a *Agent) executeJob(runID string, job models.BackupJob, storageType strin
 			Encrypt:     job.Encrypt,
 			Passphrase:  passphrase,
 			OnProgress: func(pct int, file string) {
+				if ctx.Err() != nil {
+					return
+				}
 				a.writeJSON(ws.AgentMessage{
 					Type:        ws.MsgTypeJobProgress,
 					RunID:       runID,
@@ -191,11 +218,20 @@ func (a *Agent) executeJob(runID string, job models.BackupJob, storageType strin
 			},
 		}
 		result, err = backup.BackupFiles(cfg, &buf)
+		if err == nil && ctx.Err() != nil {
+			a.sendFailure(runID, "cancelled")
+			return
+		}
 
 	case models.JobTypePostgres, models.JobTypeMySQL, models.JobTypeSQLite, models.JobTypeMongoDB:
 		var src models.DBSource
 		if err := json.Unmarshal(job.Source, &src); err != nil {
 			a.sendFailure(runID, "parse source: "+err.Error())
+			return
+		}
+
+		if ctx.Err() != nil {
+			a.sendFailure(runID, "cancelled")
 			return
 		}
 
@@ -214,6 +250,11 @@ func (a *Agent) executeJob(runID string, job models.BackupJob, storageType strin
 		}
 		tmpFile.Close()
 
+		if ctx.Err() != nil {
+			a.sendFailure(runID, "cancelled")
+			return
+		}
+
 		result, err = backup.BackupFiles(backup.FilesConfig{
 			Paths:       []string{tmpFile.Name()},
 			Compression: job.Compression,
@@ -229,6 +270,11 @@ func (a *Agent) executeJob(runID string, job models.BackupJob, storageType strin
 	if err != nil {
 		log.Printf("job %s failed: %v", job.ID, err)
 		a.sendFailure(runID, err.Error())
+		return
+	}
+
+	if ctx.Err() != nil {
+		a.sendFailure(runID, "cancelled")
 		return
 	}
 

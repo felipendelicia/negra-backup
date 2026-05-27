@@ -14,6 +14,7 @@ const (
 	MsgTypeJobDone     = "job_done"
 	MsgTypeJobFailed   = "job_failed"
 	MsgTypeRunJob      = "run_job"
+	MsgTypeCancelJob   = "cancel_job"
 )
 
 // AgentMessage is sent from agent to server.

@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from 'src/lib/api'
 import { StatusBadge } from 'src/components/StatusBadge'
 import { Button } from 'src/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'src/components/ui/card'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from 'src/components/ui/sheet'
 import { formatDate, formatBytes, formatRelative } from 'src/lib/utils'
-import { FileText } from 'lucide-react'
+import { FileText, X } from 'lucide-react'
 import { cn } from 'src/lib/utils'
 import type { BackupRun } from 'src/lib/types'
 
@@ -36,6 +36,9 @@ function useLiveLogs(run: BackupRun | null) {
         lines.push(`✗ Backup failed`)
         if (run.error_message) lines.push(`  Error: ${run.error_message}`)
         if (run.finished_at)   lines.push(`  Failed at: ${new Date(run.finished_at).toLocaleString()}`)
+      } else if (run.status === 'cancelled') {
+        lines.push(`⊘ Run cancelled by user`)
+        if (run.finished_at)  lines.push(`  Cancelled at: ${new Date(run.finished_at).toLocaleString()}`)
       }
       setLogs(lines)
       return
@@ -61,12 +64,18 @@ function useLiveLogs(run: BackupRun | null) {
   return { logs, connected }
 }
 
-const FILTERS = ['', 'running', 'success', 'failed'] as const
+const FILTERS = ['', 'running', 'success', 'failed', 'cancelled'] as const
 
 export default function Runs() {
+  const queryClient = useQueryClient()
   const [selectedRun, setSelectedRun] = useState<BackupRun | null>(null)
   const [filterStatus, setFilterStatus] = useState<string>('')
   const logsEndRef = useRef<HTMLDivElement>(null)
+
+  const cancelMutation = useMutation({
+    mutationFn: (runId: string) => api.cancelRun(runId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['runs'] }),
+  })
 
   const { data: runs = [], isLoading, isError } = useQuery({
     queryKey: ['runs'],
@@ -154,6 +163,18 @@ export default function Runs() {
                   <div className="text-xs text-muted-foreground shrink-0 hidden sm:block">
                     {run.finished_at ? formatDate(run.finished_at) : '—'}
                   </div>
+                  {run.status === 'running' && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+                      onClick={(e) => { e.stopPropagation(); cancelMutation.mutate(run.id) }}
+                      disabled={cancelMutation.isPending}
+                      title="Cancel run"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
                   <Button
                     variant="ghost"
                     size="icon"
@@ -183,9 +204,21 @@ export default function Runs() {
                   </span>
                   <StatusBadge status={selectedRun.status} />
                   {selectedRun.status === 'running' && (
-                    <span className={cn('text-xs', connected ? 'text-emerald-500' : 'text-muted-foreground')}>
-                      {connected ? '● live' : '○ connecting…'}
-                    </span>
+                    <>
+                      <span className={cn('text-xs', connected ? 'text-emerald-500' : 'text-muted-foreground')}>
+                        {connected ? '● live' : '○ connecting…'}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive ml-auto"
+                        onClick={() => cancelMutation.mutate(selectedRun.id)}
+                        disabled={cancelMutation.isPending}
+                      >
+                        <X className="h-3 w-3 mr-1" />
+                        Cancel
+                      </Button>
+                    </>
                   )}
                 </>
               )}
@@ -221,6 +254,7 @@ export default function Runs() {
                         'whitespace-pre-wrap leading-relaxed',
                         line.startsWith('✓') ? 'text-emerald-400' :
                         line.startsWith('✗') ? 'text-red-400' :
+                        line.startsWith('⊘') ? 'text-zinc-500' :
                         'text-zinc-300'
                       )}
                     >

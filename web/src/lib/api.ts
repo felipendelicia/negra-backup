@@ -63,6 +63,8 @@ export const api = {
   deleteJob: (id: string) => request<void>('DELETE', `/api/jobs/${id}`),
   triggerJob: (id: string) => request<BackupRun>('POST', `/api/jobs/${id}/run`),
 
+  cancelRun: (id: string) => request<void>('POST', `/api/runs/${id}/cancel`),
+
   listRuns: (params?: { job_id?: string; status?: string }, signal?: AbortSignal) => {
     const filtered = params ? Object.fromEntries(
       Object.entries(params).filter(([, v]) => v !== undefined)

@@ -13,6 +13,47 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	// Fetch run + agent_id via job
+	var run models.BackupRun
+	if err := s.db.Get(&run, `SELECT * FROM backup_runs WHERE id=$1`, id); err != nil {
+		respondError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if run.Status != "running" {
+		respondError(w, http.StatusConflict, "run is not active")
+		return
+	}
+
+	// Mark cancelled in DB
+	if _, err := s.db.Exec(
+		`UPDATE backup_runs SET status='cancelled', finished_at=NOW(), error_message='Cancelled by user' WHERE id=$1`,
+		id,
+	); err != nil {
+		log.Printf("handleCancelRun: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	// Send cancel signal to agent (best-effort)
+	if s.hub != nil {
+		var agentID string
+		if err := s.db.QueryRow(
+			`SELECT agent_id FROM backup_jobs WHERE id=$1`, run.JobID,
+		).Scan(&agentID); err == nil {
+			s.hub.CancelJob(agentID, id.String())
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	query := `SELECT id, job_id, started_at, finished_at, status, size_bytes, file_count, error_message, storage_path FROM backup_runs WHERE 1=1`
