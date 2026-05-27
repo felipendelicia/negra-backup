@@ -22,7 +22,14 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+var version = "dev"
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println(version)
+		return
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)

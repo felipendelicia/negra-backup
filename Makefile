@@ -2,17 +2,19 @@
 
 SERVER_BIN=bin/nat-backup-server
 AGENT_BIN=bin/nat-backup-agent
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 
 build: build-server build-agent
 
 build-server:
-	go build -o $(SERVER_BIN) ./cmd/server
+	go build $(LDFLAGS) -o $(SERVER_BIN) ./cmd/server
 
 build-agent:
-	go build -o $(AGENT_BIN) ./cmd/agent
+	go build $(LDFLAGS) -o $(AGENT_BIN) ./cmd/agent
 
 build-agent-windows:
-	GOOS=windows GOARCH=amd64 go build -o bin/nat-backup-agent.exe ./cmd/agent
+	GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o bin/nat-backup-agent.exe ./cmd/agent
 
 build-ui:
 	cd web && npm install && npm run build

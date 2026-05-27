@@ -23,15 +23,21 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const version = "1.0.0"
+var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "install" {
-		if err := install(); err != nil {
-			log.Fatalf("install failed: %v", err)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version":
+			fmt.Println(version)
+			return
+		case "install":
+			if err := install(); err != nil {
+				log.Fatalf("install failed: %v", err)
+			}
+			fmt.Println("agent installed as system service")
+			return
 		}
-		fmt.Println("agent installed as system service")
-		return
 	}
 
 	cfgPath := "agent.yaml"

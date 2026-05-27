@@ -27,6 +27,34 @@ Gestor de backups self-hosted. Un servidor central orquesta agentes que corren e
 
 Los agentes se conectan de forma saliente al servidor — no se necesitan reglas de firewall entrantes en los hosts de los agentes.
 
+## Instalación
+
+### Linux (servidor + agente)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/felipendelicia/negra-backup/main/scripts/install.sh | bash
+```
+
+Solo el agente (en máquinas que no corren el servidor):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/felipendelicia/negra-backup/main/scripts/install.sh | bash -s -- --agent-only
+```
+
+Si ya está instalado, el script detecta la versión actual y actualiza solo si hay una versión nueva.
+
+### Windows (agente)
+
+En PowerShell como **Administrador**:
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/felipendelicia/negra-backup/main/scripts/install-agent.ps1 | iex
+```
+
+El script agrega `%ProgramFiles%\nat-backup` al PATH del sistema automáticamente.
+
+---
+
 ## Inicio rápido
 
 ### 1. Iniciar el servidor
@@ -39,10 +67,8 @@ docker compose up -d postgres
 cp .env.example .env
 # Editar .env: definir JWT_SECRET, ENCRYPTION_KEY (hex de 64 chars), ADMIN_PASSWORD
 
-# Compilar y ejecutar
-make build-full
 export $(cat .env | xargs)
-./bin/nat-backup-server
+nat-backup-server
 ```
 
 Abrir `http://localhost:8080` — ingresar con `admin` / tu `ADMIN_PASSWORD`.
@@ -54,16 +80,15 @@ En la UI web → **Agentes** → crear agente → copiar la API key.
 En la máquina a respaldar:
 
 ```bash
-# Descargar el binario del agente (o compilarlo: make build-agent)
 cat > agent.yaml <<EOF
 server_url: http://tu-servidor:8080
 api_key: <pegar-api-key>
 EOF
 
-./nat-backup-agent agent.yaml
+nat-backup-agent agent.yaml
 
 # Instalar como servicio del sistema (Linux/Windows)
-./nat-backup-agent install
+nat-backup-agent install
 ```
 
 ### 3. Crear un trabajo
