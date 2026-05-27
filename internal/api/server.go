@@ -145,6 +145,7 @@ func (s *Server) buildRouter() chi.Router {
 
 		r.Get("/api/runs", s.handleListRuns)
 		r.Get("/api/runs/{id}/logs", s.handleRunLogs)
+		r.Get("/api/runs/{id}/logs/ws", s.handleRunLogsWS)
 
 		r.Get("/api/settings/notifications", s.handleGetNotificationSettings)
 		r.Put("/api/settings/notifications", s.handleUpdateNotificationSettings)

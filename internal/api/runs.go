@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/felipendelicia/nat-backup/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 )
 
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
@@ -60,4 +62,56 @@ func (s *Server) handleRunLogs(w http.ResponseWriter, r *http.Request) {
 		"status":  run.Status,
 		"message": msg,
 	})
+}
+
+var logsUpgrader = websocket.Upgrader{
+	ReadBufferSize:  256,
+	WriteBufferSize: 1024,
+	CheckOrigin:     func(r *http.Request) bool { return true },
+}
+
+func (s *Server) handleRunLogsWS(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	conn, err := logsUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("handleRunLogsWS upgrade: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	ch := s.hub.SubscribeRunLogs(id.String())
+	defer s.hub.UnsubscribeRunLogs(id.String(), ch)
+
+	// Check if run is already finished
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM backup_runs WHERE id=$1`, id).Scan(&status); err != nil || status != "running" {
+		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "run not active"))
+		return
+	}
+
+	ping := time.NewTicker(15 * time.Second)
+	defer ping.Stop()
+
+	for {
+		select {
+		case line, ok := <-ch:
+			if !ok {
+				return
+			}
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(line)); err != nil {
+				return
+			}
+		case <-ping.C:
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
 }

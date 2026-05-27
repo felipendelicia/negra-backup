@@ -24,7 +24,20 @@ function useLiveLogs(run: BackupRun | null) {
     setLogs([])
 
     if (run.status !== 'running') {
-      // No live logs for completed runs
+      // Synthesize log lines from stored run data
+      const lines: string[] = []
+      if (run.status === 'success') {
+        lines.push(`✓ Backup completed successfully`)
+        if (run.file_count != null) lines.push(`  Files backed up: ${run.file_count}`)
+        if (run.size_bytes != null) lines.push(`  Total size: ${formatBytes(run.size_bytes)}`)
+        if (run.storage_path) lines.push(`  Stored at: ${run.storage_path}`)
+        if (run.finished_at) lines.push(`  Finished: ${new Date(run.finished_at).toLocaleString()}`)
+      } else if (run.status === 'failed') {
+        lines.push(`✗ Backup failed`)
+        if (run.error_message) lines.push(`  Error: ${run.error_message}`)
+        if (run.finished_at) lines.push(`  Failed at: ${new Date(run.finished_at).toLocaleString()}`)
+      }
+      setLogs(lines)
       return
     }
 
