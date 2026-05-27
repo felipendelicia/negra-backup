@@ -17,22 +17,23 @@ type Server struct {
 	db        *sqlx.DB
 	cfg       config.Config
 	hub       *ws.Hub
-	wsHandler http.Handler
+	wsHandler *ws.AgentHandler
 }
 
-// NewServer creates the HTTP handler and returns the hub for use by the scheduler.
-func NewServer(db *sqlx.DB, cfg config.Config) (http.Handler, *ws.Hub) {
+// NewServer creates the HTTP handler and returns the hub and agent handler for use by the caller.
+func NewServer(db *sqlx.DB, cfg config.Config) (http.Handler, *ws.Hub, *ws.AgentHandler) {
 	hub := ws.NewHub(db)
 	go hub.Run()
 
+	agentHandler := ws.NewAgentHandler(hub)
 	s := &Server{
 		db:        db,
 		cfg:       cfg,
 		hub:       hub,
-		wsHandler: ws.NewAgentHandler(hub),
+		wsHandler: agentHandler,
 	}
 	s.router = s.buildRouter()
-	return s, hub
+	return s, hub, agentHandler
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

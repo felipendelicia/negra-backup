@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 	"github.com/felipendelicia/nat-backup/internal/api"
 	"github.com/felipendelicia/nat-backup/internal/config"
 	"github.com/felipendelicia/nat-backup/internal/db"
+	"github.com/felipendelicia/nat-backup/internal/models"
+	"github.com/felipendelicia/nat-backup/internal/notify"
 	"github.com/felipendelicia/nat-backup/internal/scheduler"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -44,7 +47,24 @@ func main() {
 		string(hash),
 	)
 
-	handler, hub := api.NewServer(pool, cfg)
+	handler, hub, agentHandler := api.NewServer(pool, cfg)
+
+	// Wire email notifier if notification settings exist in DB.
+	var emailSender *notify.EmailSender
+	var nsRaw []byte
+	if err := pool.QueryRow(`SELECT config FROM notification_settings WHERE type='email' LIMIT 1`).Scan(&nsRaw); err == nil {
+		var emailCfg models.EmailNotificationConfig
+		if json.Unmarshal(nsRaw, &emailCfg) == nil {
+			emailSender = notify.NewEmailSender(emailCfg)
+		}
+	}
+	if emailSender != nil {
+		agentHandler.SetFailureNotifier(emailSender)
+	}
+
+	// Start daily retention cleanup.
+	retention := notify.NewRetentionCleaner(pool, emailSender)
+	retention.StartDailySchedule()
 
 	sched := scheduler.New(pool, hub)
 	sched.Start()
