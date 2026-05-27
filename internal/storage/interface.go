@@ -13,22 +13,23 @@ type Backend interface {
 	Upload(filename string, r io.Reader, size int64) error
 }
 
-// LocalConfig holds config for the local (server HTTP upload) backend.
+// LocalConfig holds config for the local filesystem backend.
 type LocalConfig struct {
-	ServerURL string
-	APIKey    string
-	RunID     string
+	Path string
 }
 
 // NewBackend creates a storage backend from a type + raw JSON config.
 func NewBackend(destType string, rawConfig json.RawMessage, runID, serverURL, apiKey string) (Backend, error) {
 	switch destType {
 	case models.StorageTypeLocal:
-		return NewLocalBackend(LocalConfig{
-			ServerURL: serverURL,
-			APIKey:    apiKey,
-			RunID:     runID,
-		}), nil
+		var cfg models.LocalStorageConfig
+		if err := json.Unmarshal(rawConfig, &cfg); err != nil {
+			return nil, fmt.Errorf("local config: %w", err)
+		}
+		if cfg.Path == "" {
+			return nil, fmt.Errorf("local storage: path required")
+		}
+		return NewLocalBackend(LocalConfig{Path: cfg.Path}), nil
 
 	case models.StorageTypeS3:
 		var cfg models.S3StorageConfig

@@ -3,64 +3,33 @@ package storage
 import (
 	"fmt"
 	"io"
-	"mime/multipart"
-	"net/http"
+	"os"
+	"path/filepath"
 )
 
-// LocalBackend uploads files to the nat-backup server via HTTP multipart.
+// LocalBackend writes backup files directly to a local filesystem path.
 type LocalBackend struct {
-	cfg    LocalConfig
-	client *http.Client
+	cfg LocalConfig
 }
 
 func NewLocalBackend(cfg LocalConfig) *LocalBackend {
-	return &LocalBackend{cfg: cfg, client: &http.Client{}}
+	return &LocalBackend{cfg: cfg}
 }
 
-func (b *LocalBackend) Upload(filename string, r io.Reader, size int64) error {
-	pr, pw := io.Pipe()
-	mw := multipart.NewWriter(pw)
-	errCh := make(chan error, 1)
+func (b *LocalBackend) Upload(filename string, r io.Reader, _ int64) error {
+	if err := os.MkdirAll(b.cfg.Path, 0750); err != nil {
+		return fmt.Errorf("mkdir %s: %w", b.cfg.Path, err)
+	}
 
-	go func() {
-		fw, err := mw.CreateFormFile("file", filename)
-		if err != nil {
-			pw.CloseWithError(fmt.Errorf("create form file: %w", err))
-			errCh <- err
-			return
-		}
-		if _, err := io.Copy(fw, r); err != nil {
-			pw.CloseWithError(fmt.Errorf("copy to form: %w", err))
-			errCh <- err
-			return
-		}
-		mw.Close()
-		pw.Close()
-		errCh <- nil
-	}()
-
-	url := fmt.Sprintf("%s/api/upload/%s", b.cfg.ServerURL, b.cfg.RunID)
-	req, err := http.NewRequest(http.MethodPost, url, pr)
+	destPath := filepath.Join(b.cfg.Path, filename)
+	f, err := os.Create(destPath)
 	if err != nil {
-		pw.CloseWithError(err)
-		return fmt.Errorf("new request: %w", err)
+		return fmt.Errorf("create %s: %w", destPath, err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+b.cfg.APIKey)
-	// ContentLength unknown for streaming — chunked encoding (ContentLength = -1 is default)
+	defer f.Close()
 
-	resp, err := b.client.Do(req)
-	if writeErr := <-errCh; writeErr != nil && err == nil {
-		err = writeErr
-	}
-	if err != nil {
-		return fmt.Errorf("upload: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("upload failed %d: %s", resp.StatusCode, body)
+	if _, err := io.Copy(f, r); err != nil {
+		return fmt.Errorf("write %s: %w", destPath, err)
 	}
 
 	return nil

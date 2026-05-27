@@ -2,8 +2,9 @@ package storage_test
 
 import (
 	"bytes"
-	"net/http"
-	"net/http/httptest"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/felipendelicia/nat-backup/internal/storage"
@@ -12,35 +13,25 @@ import (
 )
 
 func TestLocalBackend_Upload(t *testing.T) {
-	var receivedBytes int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-		file, _, err := r.FormFile("file")
-		if err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-		defer file.Close()
-		var buf bytes.Buffer
-		buf.ReadFrom(file)
-		receivedBytes = int64(buf.Len())
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+	dir := t.TempDir()
 
-	backend := storage.NewLocalBackend(storage.LocalConfig{
-		ServerURL: srv.URL,
-		APIKey:    "test-key",
-		RunID:     "run-123",
-	})
+	backend := storage.NewLocalBackend(storage.LocalConfig{Path: dir})
 
 	data := bytes.NewReader([]byte("backup-content"))
 	err := backend.Upload("backup-2026.tar.zst", data, int64(data.Len()))
 	require.NoError(t, err)
-	assert.Equal(t, int64(14), receivedBytes)
+
+	written, err := os.ReadFile(filepath.Join(dir, "backup-2026.tar.zst"))
+	require.NoError(t, err)
+	assert.Equal(t, "backup-content", string(written))
+}
+
+func TestStorageFactory_Local(t *testing.T) {
+	dir := t.TempDir()
+	cfg, _ := json.Marshal(map[string]string{"path": dir})
+	backend, err := storage.NewBackend("local", cfg, "run-id", "server-url", "api-key")
+	require.NoError(t, err)
+	assert.NotNil(t, backend)
 }
 
 func TestStorageFactory_UnknownType(t *testing.T) {
