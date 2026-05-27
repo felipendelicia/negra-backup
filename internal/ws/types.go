@@ -14,7 +14,7 @@ const (
 
 // AgentMessage is sent from agent to server.
 type AgentMessage struct {
-	Type        string `json:"type"`
+	Type        string `json:"type,omitempty"`
 	APIKey      string `json:"api_key,omitempty"`
 	OS          string `json:"os,omitempty"`
 	Arch        string `json:"arch,omitempty"`
@@ -31,7 +31,7 @@ type AgentMessage struct {
 
 // ServerMessage is sent from server to agent.
 type ServerMessage struct {
-	Type  string            `json:"type"`
+	Type  string            `json:"type,omitempty"`
 	RunID string            `json:"run_id,omitempty"`
 	Job   *models.BackupJob `json:"job,omitempty"`
 }
