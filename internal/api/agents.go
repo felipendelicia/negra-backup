@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/felipendelicia/nat-backup/internal/models"
+	"github.com/felipendelicia/nat-backup/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
@@ -78,6 +79,34 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		"agent":   agent,
 		"api_key": plainKey,
 	})
+}
+
+func (s *Server) handleBrowseAgent(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		path = "/"
+	}
+
+	if s.hub == nil || !s.hub.IsConnected(id.String()) {
+		respondError(w, http.StatusConflict, "agent is not online")
+		return
+	}
+
+	reqID := uuid.New().String()
+	entries, err := s.hub.BrowsePath(id.String(), reqID, path)
+	if err != nil {
+		respondError(w, http.StatusGatewayTimeout, err.Error())
+		return
+	}
+	if entries == nil {
+		entries = []ws.BrowseEntry{}
+	}
+	respond(w, http.StatusOK, entries)
 }
 
 func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {

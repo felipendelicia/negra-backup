@@ -14,27 +14,40 @@ const (
 	MsgTypeJobDone     = "job_done"
 	MsgTypeJobFailed   = "job_failed"
 	MsgTypeRunJob      = "run_job"
-	MsgTypeCancelJob   = "cancel_job"
-	MsgTypeUpdateAgent = "update_agent"
-	MsgTypeAgentLog    = "agent_log"
+	MsgTypeCancelJob    = "cancel_job"
+	MsgTypeUpdateAgent  = "update_agent"
+	MsgTypeAgentLog     = "agent_log"
+	MsgTypeBrowsePath   = "browse_path"
+	MsgTypeBrowseResult = "browse_result"
 )
+
+// BrowseEntry represents a filesystem entry returned by the agent.
+type BrowseEntry struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	IsDir bool   `json:"is_dir"`
+}
 
 // AgentMessage is sent from agent to server.
 type AgentMessage struct {
-	Type        string `json:"type,omitempty"`
-	APIKey      string `json:"api_key,omitempty"`
-	OS          string `json:"os,omitempty"`
-	Arch        string `json:"arch,omitempty"`
-	Version     string `json:"version,omitempty"`
-	RunID       string `json:"run_id,omitempty"`
-	Percent     int    `json:"percent,omitempty"`
-	CurrentFile string `json:"current_file,omitempty"`
-	Status      string `json:"status,omitempty"`
-	SizeBytes   int64  `json:"size_bytes,omitempty"`
-	StoragePath string `json:"storage_path,omitempty"`
-	FileCount   int    `json:"file_count,omitempty"`
-	Error       string `json:"error,omitempty"`
-	Log         string `json:"log,omitempty"`
+	Type         string        `json:"type,omitempty"`
+	APIKey       string        `json:"api_key,omitempty"`
+	OS           string        `json:"os,omitempty"`
+	Arch         string        `json:"arch,omitempty"`
+	Version      string        `json:"version,omitempty"`
+	RunID        string        `json:"run_id,omitempty"`
+	Percent      int           `json:"percent,omitempty"`
+	CurrentFile  string        `json:"current_file,omitempty"`
+	Status       string        `json:"status,omitempty"`
+	SizeBytes    int64         `json:"size_bytes,omitempty"`
+	StoragePath  string        `json:"storage_path,omitempty"`
+	FileCount    int           `json:"file_count,omitempty"`
+	Error        string        `json:"error,omitempty"`
+	Log          string        `json:"log,omitempty"`
+	// Browse
+	RequestID    string        `json:"request_id,omitempty"`
+	Entries      []BrowseEntry `json:"entries,omitempty"`
+	BrowseError  string        `json:"browse_error,omitempty"`
 }
 
 // ServerMessage is sent from server to agent.
@@ -45,4 +58,7 @@ type ServerMessage struct {
 	StorageType   string            `json:"storage_type,omitempty"`
 	StorageConfig json.RawMessage   `json:"storage_config,omitempty"`
 	Passphrase    string            `json:"passphrase,omitempty"` // decrypted, in-flight only
+	// Browse
+	RequestID     string            `json:"request_id,omitempty"`
+	Path          string            `json:"path,omitempty"`
 }

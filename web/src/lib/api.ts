@@ -50,6 +50,8 @@ export const api = {
   createAgent: (name: string) => request<{ agent: Agent; api_key: string }>('POST', '/api/agents', { name }),
   deleteAgent: (id: string) => request<void>('DELETE', `/api/agents/${id}`),
   updateAgent: (id: string) => request<void>('POST', `/api/agents/${id}/update`),
+  browseAgent: (id: string, path: string, signal?: AbortSignal) =>
+    request<{ name: string; path: string; is_dir: boolean }[]>('GET', `/api/agents/${id}/browse?path=${encodeURIComponent(path)}`, undefined, signal),
 
   listStorage: (signal?: AbortSignal) => request<StorageDestination[]>('GET', '/api/storage-destinations', undefined, signal),
   createStorage: (data: CreateStorageRequest) =>

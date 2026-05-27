@@ -13,6 +13,7 @@ import { Switch } from 'src/components/ui/switch'
 import { cronHumanize } from 'src/lib/utils'
 import { Plus, Trash2, Play, Pencil } from 'lucide-react'
 import { cn } from 'src/lib/utils'
+import { FileBrowser } from 'src/components/FileBrowser'
 import type { BackupJob, CreateJobRequest } from 'src/lib/types'
 
 const JOB_TYPES = ['files', 'postgres', 'mysql', 'sqlite', 'mongodb'] as const
@@ -43,10 +44,14 @@ const emptyForm = (): CreateJobRequest => ({
 function SourceFields({
   type,
   source,
+  agentId,
+  agentOnline,
   onChange,
 }: {
   type: BackupJob['type']
   source: Record<string, unknown>
+  agentId: string
+  agentOnline: boolean
   onChange: (s: Record<string, unknown>) => void
 }) {
   function field(key: string, label: string, placeholder?: string) {
@@ -63,15 +68,32 @@ function SourceFields({
   }
 
   if (type === 'files') {
-    // paths is stored as array; UI shows comma-separated string
-    const pathsVal = Array.isArray(source['paths'])
-      ? (source['paths'] as string[]).join(', ')
-      : (source['paths'] as string) ?? ''
+    const paths = Array.isArray(source['paths']) ? (source['paths'] as string[]) : []
+
+    if (agentId && agentOnline) {
+      return (
+        <div className="space-y-1.5">
+          <Label>Source Paths</Label>
+          <FileBrowser
+            agentId={agentId}
+            selectedPaths={paths}
+            onChange={newPaths => onChange({ paths: newPaths })}
+          />
+        </div>
+      )
+    }
+
+    // Fallback: plain text input when no agent selected or offline
     return (
       <div className="space-y-1">
-        <Label>Source Paths <span className="text-xs text-muted-foreground">(comma-separated)</span></Label>
+        <Label>
+          Source Paths
+          <span className="ml-1.5 text-xs text-muted-foreground font-normal">
+            {agentId && !agentOnline ? '(agent offline — enter manually)' : '(comma-separated)'}
+          </span>
+        </Label>
         <Input
-          value={pathsVal}
+          value={paths.join(', ')}
           placeholder="/home/user/documents, /var/data"
           onChange={e => {
             const arr = e.target.value.split(',').map(s => s.trim()).filter(Boolean)
@@ -329,6 +351,8 @@ export default function Jobs() {
             <SourceFields
               type={form.type}
               source={form.source}
+              agentId={form.agent_id}
+              agentOnline={agents.find(a => a.id === form.agent_id)?.status === 'online'}
               onChange={source => setForm(f => ({ ...f, source }))}
             />
 

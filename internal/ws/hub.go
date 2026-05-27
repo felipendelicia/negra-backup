@@ -3,6 +3,7 @@ package ws
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -19,12 +20,21 @@ type AgentConn struct {
 	send    chan []byte
 }
 
+// BrowseResponse carries the result of a browse_path request.
+type BrowseResponse struct {
+	Entries []BrowseEntry
+	Err     string
+}
+
 type Hub struct {
 	mu      sync.RWMutex
 	agents  map[string]*AgentConn
 
 	logMu   sync.RWMutex
 	logSubs map[string][]chan string
+
+	browseMu   sync.Mutex
+	browseReqs map[string]chan BrowseResponse
 
 	register   chan *AgentConn
 	unregister chan *AgentConn
@@ -35,6 +45,7 @@ func NewHub(db *sqlx.DB) *Hub {
 	return &Hub{
 		agents:     make(map[string]*AgentConn),
 		logSubs:    make(map[string][]chan string),
+		browseReqs: make(map[string]chan BrowseResponse),
 		register:   make(chan *AgentConn, 16),
 		unregister: make(chan *AgentConn, 16),
 		db:         db,
@@ -157,6 +168,55 @@ func (h *Hub) DispatchJob(agentID, runID string, job models.BackupJob, storageTy
 	case ac.send <- data:
 	default:
 		log.Printf("dispatch: agent %s send buffer full", agentID)
+	}
+}
+
+// BrowsePath sends a browse_path request to the agent and waits for the result.
+// Returns an error if the agent is not connected or times out.
+func (h *Hub) BrowsePath(agentID, requestID, path string) ([]BrowseEntry, error) {
+	h.mu.RLock()
+	ac, ok := h.agents[agentID]
+	h.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("agent not connected")
+	}
+
+	ch := make(chan BrowseResponse, 1)
+	h.browseMu.Lock()
+	h.browseReqs[requestID] = ch
+	h.browseMu.Unlock()
+
+	defer func() {
+		h.browseMu.Lock()
+		delete(h.browseReqs, requestID)
+		h.browseMu.Unlock()
+	}()
+
+	data, _ := json.Marshal(ServerMessage{Type: MsgTypeBrowsePath, RequestID: requestID, Path: path})
+	select {
+	case ac.send <- data:
+	default:
+		return nil, fmt.Errorf("agent send buffer full")
+	}
+
+	select {
+	case res := <-ch:
+		if res.Err != "" {
+			return nil, fmt.Errorf("%s", res.Err)
+		}
+		return res.Entries, nil
+	case <-time.After(8 * time.Second):
+		return nil, fmt.Errorf("timeout waiting for agent response")
+	}
+}
+
+// DeliverBrowseResult routes a browse_result message from the agent to the waiting caller.
+func (h *Hub) DeliverBrowseResult(requestID string, entries []BrowseEntry, errStr string) {
+	h.browseMu.Lock()
+	ch, ok := h.browseReqs[requestID]
+	h.browseMu.Unlock()
+	if ok {
+		ch <- BrowseResponse{Entries: entries, Err: errStr}
 	}
 }
 

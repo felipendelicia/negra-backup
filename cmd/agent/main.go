@@ -188,6 +188,9 @@ func (a *Agent) connect() error {
 			}
 			a.runCtxsMu.Unlock()
 
+		case ws.MsgTypeBrowsePath:
+			go a.handleBrowse(msg.RequestID, msg.Path)
+
 		case ws.MsgTypeUpdateAgent:
 			log.Println("update requested by server")
 			go func() {
@@ -328,6 +331,29 @@ func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJ
 		log.Printf("send job_done: %v", err)
 	}
 	log.Printf("job %s completed", job.ID)
+}
+
+func (a *Agent) handleBrowse(requestID, path string) {
+	if path == "" {
+		path = "/"
+	}
+
+	entries, err := os.ReadDir(path)
+	resp := ws.AgentMessage{Type: ws.MsgTypeBrowseResult, RequestID: requestID}
+
+	if err != nil {
+		resp.BrowseError = err.Error()
+	} else {
+		for _, e := range entries {
+			fullPath := filepath.Join(path, e.Name())
+			resp.Entries = append(resp.Entries, ws.BrowseEntry{
+				Name:  e.Name(),
+				Path:  fullPath,
+				IsDir: e.IsDir(),
+			})
+		}
+	}
+	a.writeJSON(resp) //nolint:errcheck
 }
 
 // wsLogWriter forwards log lines to the server via agent_log WS messages.

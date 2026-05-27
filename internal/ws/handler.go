@@ -109,6 +109,9 @@ func (h *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *AgentHandler) handleAgentMessage(agentID string, msg AgentMessage) {
 	switch msg.Type {
+	case MsgTypeBrowseResult:
+		h.hub.DeliverBrowseResult(msg.RequestID, msg.Entries, msg.BrowseError)
+
 	case MsgTypeAgentLog:
 		if h.consoleWriter != nil && msg.Log != "" {
 			// Resolve agent name for the prefix
