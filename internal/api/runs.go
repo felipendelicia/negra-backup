@@ -31,7 +31,7 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	query += " ORDER BY started_at DESC LIMIT 100"
 
-	var runs []models.BackupRun
+	runs := []models.BackupRun{}
 	if err := s.db.Select(&runs, query, args...); err != nil {
 		log.Printf("handleListRuns: %v", err)
 		respondError(w, http.StatusInternalServerError, "internal server error")

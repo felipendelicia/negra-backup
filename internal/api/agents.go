@@ -15,7 +15,7 @@ import (
 )
 
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
-	var agents []models.Agent
+	agents := []models.Agent{}
 	if err := s.db.Select(&agents, `SELECT id, name, os, arch, version, last_seen, status, created_at FROM agents ORDER BY created_at DESC`); err != nil {
 		log.Printf("handleListAgents: %v", err)
 		respondError(w, http.StatusInternalServerError, "internal server error")

@@ -19,7 +19,7 @@ type createStorageRequest struct {
 }
 
 func (s *Server) handleListStorage(w http.ResponseWriter, r *http.Request) {
-	var dests []models.StorageDestination
+	dests := []models.StorageDestination{}
 	// Config column intentionally excluded from list (contains secrets)
 	if err := s.db.Select(&dests, `SELECT id, name, type, created_at FROM storage_destinations ORDER BY created_at DESC`); err != nil {
 		log.Printf("handleListStorage: %v", err)

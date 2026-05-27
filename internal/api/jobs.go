@@ -28,7 +28,7 @@ type createJobRequest struct {
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
-	var jobs []models.BackupJob
+	jobs := []models.BackupJob{}
 	if err := s.db.Select(&jobs, `
 		SELECT id, agent_id, name, enabled, type, source, storage_destination_id,
 		       schedule_cron, retention_days, compression, encrypt, created_at, updated_at
