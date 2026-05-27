@@ -3,9 +3,11 @@ package api
 
 import (
 	"encoding/json"
+	"io/fs"
 	"net/http"
 
 	"github.com/felipendelicia/nat-backup/internal/config"
+	apiStatic "github.com/felipendelicia/nat-backup/internal/api/static"
 	"github.com/felipendelicia/nat-backup/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -38,6 +40,55 @@ func NewServer(db *sqlx.DB, cfg config.Config) (http.Handler, *ws.Hub, *ws.Agent
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
+}
+
+// NewServerWithStatic creates a server that also serves the embedded React UI.
+func NewServerWithStatic(db *sqlx.DB, cfg config.Config) (http.Handler, *ws.Hub, *ws.AgentHandler) {
+	hub := ws.NewHub(db)
+	go hub.Run()
+	agentHandler := ws.NewAgentHandler(hub)
+	s := &Server{
+		db:        db,
+		cfg:       cfg,
+		hub:       hub,
+		wsHandler: agentHandler,
+	}
+	s.router = s.buildRouterWithStatic()
+	return s, hub, agentHandler
+}
+
+func (s *Server) buildRouterWithStatic() chi.Router {
+	r := s.buildRouter()
+
+	distFS, err := fs.Sub(apiStatic.FS, "dist")
+	if err != nil {
+		return r // no embedded UI
+	}
+
+	fileServer := http.FileServer(http.FS(distFS))
+
+	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+		// Try serving the asset; fall back to index.html for SPA routing
+		p := r.URL.Path
+		if len(p) > 0 && p[0] == '/' {
+			p = p[1:]
+		}
+		if p == "" {
+			r2 := *r
+			r2.URL.Path = "/"
+			fileServer.ServeHTTP(w, &r2)
+			return
+		}
+		if _, err := distFS.Open(p); err != nil {
+			r2 := *r
+			r2.URL.Path = "/"
+			fileServer.ServeHTTP(w, &r2)
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
+
+	return r
 }
 
 func (s *Server) buildRouter() chi.Router {

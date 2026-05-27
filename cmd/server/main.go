@@ -48,7 +48,7 @@ func main() {
 		string(hash),
 	)
 
-	handler, hub, agentHandler := api.NewServer(pool, cfg)
+	handler, hub, agentHandler := api.NewServerWithStatic(pool, cfg)
 
 	// Wire email notifier if notification settings exist in DB.
 	var emailSender *notify.EmailSender
