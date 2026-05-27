@@ -14,7 +14,7 @@ import (
 )
 
 type JobDispatcher interface {
-	DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage)
+	DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage, passphrase string)
 }
 
 type Scheduler struct {
@@ -129,8 +129,18 @@ func (s *Scheduler) triggerJob(job models.BackupJob) {
 		}
 	}
 
+	var passphrase string
+	if job.Encrypt && job.EncryptPassphrase != nil {
+		decPass, decErr := crypto.Decrypt(s.encKey, *job.EncryptPassphrase)
+		if decErr != nil {
+			log.Printf("scheduler decrypt passphrase for job %s: %v", job.ID, decErr)
+		} else {
+			passphrase = decPass
+		}
+	}
+
 	log.Printf("scheduler dispatching job %s (run %s) to agent %s", job.ID, runID, job.AgentID)
-	s.dispatcher.DispatchJob(job.AgentID.String(), runID, job, storageType, storageConfig)
+	s.dispatcher.DispatchJob(job.AgentID.String(), runID, job, storageType, storageConfig, passphrase)
 }
 
 // ValidateCron returns an error if the cron expression is invalid.

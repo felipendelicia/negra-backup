@@ -36,8 +36,8 @@ func TarCompress(paths []string, w io.Writer, compression string) (totalBytes in
 
 	tw := tar.NewWriter(compWriter)
 
-	for _, path := range paths {
-		if walkErr := filepath.WalkDir(path, func(p string, d os.DirEntry, werr error) error {
+	for _, root := range paths {
+		if walkErr := filepath.WalkDir(root, func(p string, d os.DirEntry, werr error) error {
 			if werr != nil {
 				return werr
 			}
@@ -51,7 +51,11 @@ func TarCompress(paths []string, w io.Writer, compression string) (totalBytes in
 			if err != nil {
 				return fmt.Errorf("tar header for %s: %w", p, err)
 			}
-			header.Name = p
+			relName, relErr := filepath.Rel(filepath.Dir(root), p)
+			if relErr != nil {
+				relName = p // fallback
+			}
+			header.Name = filepath.ToSlash(relName)
 
 			if err := tw.WriteHeader(header); err != nil {
 				return fmt.Errorf("write header %s: %w", p, err)
@@ -70,7 +74,7 @@ func TarCompress(paths []string, w io.Writer, compression string) (totalBytes in
 			// Close on error (best-effort)
 			tw.Close()
 			compWriter.Close()
-			return totalBytes, fmt.Errorf("walk %s: %w", path, walkErr)
+			return totalBytes, fmt.Errorf("walk %s: %w", root, walkErr)
 		}
 	}
 

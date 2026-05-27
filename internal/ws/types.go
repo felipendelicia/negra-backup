@@ -40,4 +40,5 @@ type ServerMessage struct {
 	Job           *models.BackupJob `json:"job,omitempty"`
 	StorageType   string            `json:"storage_type,omitempty"`
 	StorageConfig json.RawMessage   `json:"storage_config,omitempty"`
+	Passphrase    string            `json:"passphrase,omitempty"` // decrypted, in-flight only
 }

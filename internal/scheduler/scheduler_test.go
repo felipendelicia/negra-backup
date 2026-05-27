@@ -13,7 +13,7 @@ import (
 
 type mockDispatcher struct{}
 
-func (m *mockDispatcher) DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage) {
+func (m *mockDispatcher) DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage, passphrase string) {
 }
 
 func TestScheduler_StartStop(t *testing.T) {

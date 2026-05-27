@@ -81,6 +81,11 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	if s.sched != nil {
+		if err := s.sched.AddJob(job); err != nil {
+			log.Printf("scheduler add job: %v", err)
+		}
+	}
 	respond(w, http.StatusCreated, job)
 }
 
@@ -124,6 +129,14 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "job not found")
 		return
 	}
+	if s.sched != nil {
+		var updatedJob models.BackupJob
+		if err := s.db.Get(&updatedJob, `SELECT * FROM backup_jobs WHERE id=$1`, id); err == nil {
+			if err := s.sched.AddJob(updatedJob); err != nil {
+				log.Printf("scheduler update job: %v", err)
+			}
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -143,6 +156,9 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	if rows == 0 {
 		respondError(w, http.StatusNotFound, "not found")
 		return
+	}
+	if s.sched != nil {
+		s.sched.RemoveJob(id.String())
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -171,27 +187,31 @@ func (s *Server) handleTriggerJob(w http.ResponseWriter, r *http.Request) {
 		// Fetch storage destination
 		var destType string
 		var encryptedConfig string
-		err := s.db.QueryRow(
+		if err := s.db.QueryRow(
 			`SELECT type, config FROM storage_destinations WHERE id = $1`,
 			job.StorageDestinationID,
-		).Scan(&destType, &encryptedConfig)
-
-		var storageType string
-		var storageConfig json.RawMessage
-
-		if err == nil {
-			decryptedConfig, decErr := crypto.Decrypt(s.cfg.EncryptionKey, encryptedConfig)
-			if decErr == nil {
-				storageType = destType
-				storageConfig = json.RawMessage(decryptedConfig)
-			} else {
-				log.Printf("decrypt storage config for job %s: %v", job.ID, decErr)
-			}
-		} else {
-			log.Printf("fetch storage destination for job %s: %v", job.ID, err)
+		).Scan(&destType, &encryptedConfig); err != nil {
+			log.Printf("handleTriggerJob: fetch storage: %v", err)
+			respondError(w, http.StatusInternalServerError, "storage destination not found")
+			return
 		}
+		decryptedConfig, decErr := crypto.Decrypt(s.cfg.EncryptionKey, encryptedConfig)
+		if decErr != nil {
+			log.Printf("handleTriggerJob: decrypt storage: %v", decErr)
+			respondError(w, http.StatusInternalServerError, "storage config decrypt failed")
+			return
+		}
+		storageType := destType
+		storageConfig := json.RawMessage(decryptedConfig)
 
-		s.hub.DispatchJob(job.AgentID.String(), run.ID.String(), job, storageType, storageConfig)
+		var passphrase string
+		if job.Encrypt && job.EncryptPassphrase != nil {
+			decPass, decErr := crypto.Decrypt(s.cfg.EncryptionKey, *job.EncryptPassphrase)
+			if decErr == nil {
+				passphrase = decPass
+			}
+		}
+		s.hub.DispatchJob(job.AgentID.String(), run.ID.String(), job, storageType, storageConfig, passphrase)
 	}
 	respond(w, http.StatusCreated, run)
 }

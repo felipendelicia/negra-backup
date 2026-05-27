@@ -22,7 +22,7 @@ func NewSFTPBackend(cfg models.SFTPStorageConfig) (*SFTPBackend, error) {
 }
 
 func (b *SFTPBackend) Upload(filename string, r io.Reader, size int64) error {
-	addr := fmt.Sprintf("%s:%d", b.cfg.Host, b.cfg.Port)
+	addr := net.JoinHostPort(b.cfg.Host, fmt.Sprintf("%d", b.cfg.Port))
 
 	var authMethods []ssh.AuthMethod
 	if b.cfg.PrivateKey != "" {

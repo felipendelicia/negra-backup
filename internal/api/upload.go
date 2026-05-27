@@ -30,6 +30,21 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusConflict, "run is not in running state")
 		return
 	}
+
+	// Verify the run's job belongs to the authenticated agent
+	authedAgentID, _ := r.Context().Value(contextKeyAgentID).(string)
+	var jobAgentID string
+	if err := s.db.QueryRow(`
+		SELECT bj.agent_id FROM backup_runs br
+		JOIN backup_jobs bj ON bj.id = br.job_id
+		WHERE br.id = $1`, runID).Scan(&jobAgentID); err != nil {
+		respondError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if jobAgentID != authedAgentID {
+		respondError(w, http.StatusForbidden, "forbidden")
+		return
+	}
 	if err := r.ParseMultipartForm(maxUploadMemory); err != nil {
 		respondError(w, http.StatusBadRequest, "parse multipart: "+err.Error())
 		return

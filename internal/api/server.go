@@ -6,8 +6,9 @@ import (
 	"io/fs"
 	"net/http"
 
-	"github.com/felipendelicia/nat-backup/internal/config"
 	apiStatic "github.com/felipendelicia/nat-backup/internal/api/static"
+	"github.com/felipendelicia/nat-backup/internal/config"
+	"github.com/felipendelicia/nat-backup/internal/models"
 	"github.com/felipendelicia/nat-backup/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -20,10 +21,21 @@ type Server struct {
 	cfg       config.Config
 	hub       *ws.Hub
 	wsHandler *ws.AgentHandler
+	sched     interface {
+		AddJob(job models.BackupJob) error
+		RemoveJob(jobID string)
+	}
+}
+
+func (s *Server) SetScheduler(sched interface {
+	AddJob(job models.BackupJob) error
+	RemoveJob(jobID string)
+}) {
+	s.sched = sched
 }
 
 // NewServer creates the HTTP handler and returns the hub and agent handler for use by the caller.
-func NewServer(db *sqlx.DB, cfg config.Config) (http.Handler, *ws.Hub, *ws.AgentHandler) {
+func NewServer(db *sqlx.DB, cfg config.Config) (*Server, *ws.Hub, *ws.AgentHandler) {
 	hub := ws.NewHub(db)
 	go hub.Run()
 
@@ -43,7 +55,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // NewServerWithStatic creates a server that also serves the embedded React UI.
-func NewServerWithStatic(db *sqlx.DB, cfg config.Config) (http.Handler, *ws.Hub, *ws.AgentHandler) {
+func NewServerWithStatic(db *sqlx.DB, cfg config.Config) (*Server, *ws.Hub, *ws.AgentHandler) {
 	hub := ws.NewHub(db)
 	go hub.Run()
 	agentHandler := ws.NewAgentHandler(hub)
@@ -117,6 +129,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Use(s.jwtAuthMiddleware)
 
 		r.Get("/api/agents", s.handleListAgents)
+		r.Post("/api/agents", s.handleCreateAgent)
 		r.Delete("/api/agents/{id}", s.handleDeleteAgent)
 
 		r.Get("/api/storage-destinations", s.handleListStorage)

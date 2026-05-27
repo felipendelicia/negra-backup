@@ -4,6 +4,7 @@ package api
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"log"
 	"net/http"
 
@@ -41,6 +42,42 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type createAgentRequest struct {
+	Name string `json:"name"`
+}
+
+func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
+	var req createAgentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		respondError(w, http.StatusBadRequest, "name required")
+		return
+	}
+
+	plainKey, hash, err := generateAPIKey()
+	if err != nil {
+		log.Printf("handleCreateAgent: generateAPIKey: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	var agent models.Agent
+	err = s.db.QueryRowx(
+		`INSERT INTO agents (name, api_key, status) VALUES ($1, $2, 'offline') RETURNING id, name, os, arch, version, last_seen, status, created_at`,
+		req.Name, hash,
+	).StructScan(&agent)
+	if err != nil {
+		log.Printf("handleCreateAgent: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	// Return plaintext API key once — client must save it
+	respond(w, http.StatusCreated, map[string]any{
+		"agent":   agent,
+		"api_key": plainKey,
+	})
 }
 
 // generateAPIKey creates a random 32-byte hex API key and its bcrypt hash.

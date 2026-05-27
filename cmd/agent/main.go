@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -149,12 +150,12 @@ func (a *Agent) connect() error {
 		}
 
 		if msg.Type == ws.MsgTypeRunJob && msg.Job != nil {
-			go a.executeJob(msg.RunID, *msg.Job, msg.StorageType, msg.StorageConfig)
+			go a.executeJob(msg.RunID, *msg.Job, msg.StorageType, msg.StorageConfig, msg.Passphrase)
 		}
 	}
 }
 
-func (a *Agent) executeJob(runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage) {
+func (a *Agent) executeJob(runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage, passphrase string) {
 	log.Printf("executing job %s (run %s)", job.ID, runID)
 
 	var err error
@@ -167,11 +168,6 @@ func (a *Agent) executeJob(runID string, job models.BackupJob, storageType strin
 		if err := json.Unmarshal(job.Source, &src); err != nil {
 			a.sendFailure(runID, "parse source: "+err.Error())
 			return
-		}
-
-		passphrase := ""
-		if job.Encrypt && job.EncryptPassphrase != nil {
-			passphrase = *job.EncryptPassphrase
 		}
 
 		cfg := backup.FilesConfig{
@@ -211,11 +207,6 @@ func (a *Agent) executeJob(runID string, job models.BackupJob, storageType strin
 			return
 		}
 		tmpFile.Close()
-
-		passphrase := ""
-		if job.Encrypt && job.EncryptPassphrase != nil {
-			passphrase = *job.EncryptPassphrase
-		}
 
 		result, err = backup.BackupFiles(backup.FilesConfig{
 			Paths:       []string{tmpFile.Name()},
@@ -284,14 +275,19 @@ func (a *Agent) sendFailure(runID, errMsg string) {
 }
 
 func toWSURL(serverURL string) string {
-	switch {
-	case len(serverURL) >= 8 && serverURL[:8] == "https://":
-		return "wss://" + serverURL[8:]
-	case len(serverURL) >= 7 && serverURL[:7] == "http://":
-		return "ws://" + serverURL[7:]
-	default:
+	u, err := url.Parse(serverURL)
+	if err != nil {
 		return "ws://" + serverURL
 	}
+	switch u.Scheme {
+	case "https":
+		u.Scheme = "wss"
+	case "http":
+		u.Scheme = "ws"
+	default:
+		u.Scheme = "ws"
+	}
+	return u.String()
 }
 
 func install() error {

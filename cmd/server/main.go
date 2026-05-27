@@ -48,7 +48,7 @@ func main() {
 		string(hash),
 	)
 
-	handler, hub, agentHandler := api.NewServerWithStatic(pool, cfg)
+	srv, hub, agentHandler := api.NewServerWithStatic(pool, cfg)
 
 	// Wire email notifier if notification settings exist in DB.
 	var emailSender *notify.EmailSender
@@ -74,13 +74,14 @@ func main() {
 	retention.StartDailySchedule()
 
 	sched := scheduler.New(pool, hub, cfg.EncryptionKey)
+	srv.SetScheduler(sched)
 	sched.Start()
 	defer sched.Stop()
 
 	addr := ":" + cfg.Port
-	srv := &http.Server{
+	httpSrv := &http.Server{
 		Addr:         addr,
-		Handler:      handler,
+		Handler:      srv,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 5 * time.Minute,
 		IdleTimeout:  120 * time.Second,
@@ -89,11 +90,11 @@ func main() {
 	go func() {
 		fmt.Printf("nat-backup-server listening on %s\n", addr)
 		if cfg.TLSEnabled {
-			if err := srv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != http.ErrServerClosed {
+			if err := httpSrv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != http.ErrServerClosed {
 				log.Fatalf("tls server: %v", err)
 			}
 		} else {
-			if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			if err := httpSrv.ListenAndServe(); err != http.ErrServerClosed {
 				log.Fatalf("server: %v", err)
 			}
 		}
@@ -105,7 +106,7 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := httpSrv.Shutdown(ctx); err != nil {
 		log.Printf("server shutdown: %v", err)
 	}
 	fmt.Println("server stopped")

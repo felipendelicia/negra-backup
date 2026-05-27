@@ -91,7 +91,7 @@ func (h *Hub) IsConnected(agentID string) bool {
 	return ok
 }
 
-func (h *Hub) DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage) {
+func (h *Hub) DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage, passphrase string) {
 	h.mu.RLock()
 	ac, ok := h.agents[agentID]
 	h.mu.RUnlock()
@@ -106,6 +106,7 @@ func (h *Hub) DispatchJob(agentID, runID string, job models.BackupJob, storageTy
 		Job:           &job,
 		StorageType:   storageType,
 		StorageConfig: storageConfig,
+		Passphrase:    passphrase,
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
