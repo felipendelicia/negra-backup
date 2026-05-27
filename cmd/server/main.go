@@ -73,7 +73,7 @@ func main() {
 	retention := notify.NewRetentionCleaner(pool, emailSender)
 	retention.StartDailySchedule()
 
-	sched := scheduler.New(pool, hub)
+	sched := scheduler.New(pool, hub, cfg.EncryptionKey)
 	sched.Start()
 	defer sched.Stop()
 

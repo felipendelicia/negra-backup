@@ -3,8 +3,9 @@ package storage
 import (
 	"fmt"
 	"io"
+	"log"
 	"net"
-	"path/filepath"
+	"path"
 
 	"github.com/felipendelicia/nat-backup/internal/models"
 	"github.com/pkg/sftp"
@@ -62,8 +63,12 @@ func (b *SFTPBackend) Upload(filename string, r io.Reader, size int64) error {
 	}
 	defer sftpClient.Close()
 
-	remotePath := filepath.Join(b.cfg.Path, filename)
-	sftpClient.MkdirAll(filepath.Dir(remotePath))
+	// Use path.Join for POSIX-style remote paths (cross-platform safe)
+	remotePath := path.Join(b.cfg.Path, filename)
+	if err := sftpClient.MkdirAll(path.Dir(remotePath)); err != nil {
+		// Non-fatal if dir already exists; log but proceed
+		log.Printf("sftp mkdir %s: %v", path.Dir(remotePath), err)
+	}
 
 	dst, err := sftpClient.Create(remotePath)
 	if err != nil {

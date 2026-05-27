@@ -1,7 +1,11 @@
 // internal/ws/types.go
 package ws
 
-import "github.com/felipendelicia/nat-backup/internal/models"
+import (
+	"encoding/json"
+
+	"github.com/felipendelicia/nat-backup/internal/models"
+)
 
 const (
 	MsgTypeHello       = "hello"
@@ -31,7 +35,9 @@ type AgentMessage struct {
 
 // ServerMessage is sent from server to agent.
 type ServerMessage struct {
-	Type  string            `json:"type,omitempty"`
-	RunID string            `json:"run_id,omitempty"`
-	Job   *models.BackupJob `json:"job,omitempty"`
+	Type          string            `json:"type,omitempty"`
+	RunID         string            `json:"run_id,omitempty"`
+	Job           *models.BackupJob `json:"job,omitempty"`
+	StorageType   string            `json:"storage_type,omitempty"`
+	StorageConfig json.RawMessage   `json:"storage_config,omitempty"`
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
@@ -64,7 +66,17 @@ func main() {
 // Agent holds the running agent state.
 type Agent struct {
 	cfg  agentInternal.AgentConfig
+	mu   sync.Mutex
 	conn *websocket.Conn
+}
+
+func (a *Agent) writeJSON(v any) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	return a.conn.WriteJSON(v)
 }
 
 func (a *Agent) connect() error {
@@ -73,8 +85,17 @@ func (a *Agent) connect() error {
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
-	defer conn.Close()
+
+	a.mu.Lock()
 	a.conn = conn
+	a.mu.Unlock()
+
+	defer func() {
+		a.mu.Lock()
+		a.conn = nil
+		a.mu.Unlock()
+		conn.Close()
+	}()
 
 	hello := ws.AgentMessage{
 		Type:    ws.MsgTypeHello,
@@ -83,18 +104,26 @@ func (a *Agent) connect() error {
 		Arch:    runtime.GOARCH,
 		Version: version,
 	}
-	if err := conn.WriteJSON(hello); err != nil {
+	if err := a.writeJSON(hello); err != nil {
 		return fmt.Errorf("send hello: %w", err)
 	}
 
 	log.Println("connected to server")
 
-	// Heartbeat goroutine
+	// Heartbeat goroutine — exits when ctx is cancelled (connect returns)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			if err := conn.WriteJSON(ws.AgentMessage{Type: ws.MsgTypeHeartbeat}); err != nil {
+		for {
+			select {
+			case <-ticker.C:
+				if err := a.writeJSON(ws.AgentMessage{Type: ws.MsgTypeHeartbeat}); err != nil {
+					return
+				}
+			case <-ctx.Done():
 				return
 			}
 		}
@@ -120,12 +149,12 @@ func (a *Agent) connect() error {
 		}
 
 		if msg.Type == ws.MsgTypeRunJob && msg.Job != nil {
-			go a.executeJob(msg.RunID, *msg.Job)
+			go a.executeJob(msg.RunID, *msg.Job, msg.StorageType, msg.StorageConfig)
 		}
 	}
 }
 
-func (a *Agent) executeJob(runID string, job models.BackupJob) {
+func (a *Agent) executeJob(runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage) {
 	log.Printf("executing job %s (run %s)", job.ID, runID)
 
 	var err error
@@ -151,7 +180,7 @@ func (a *Agent) executeJob(runID string, job models.BackupJob) {
 			Encrypt:     job.Encrypt,
 			Passphrase:  passphrase,
 			OnProgress: func(pct int, file string) {
-				a.conn.WriteJSON(ws.AgentMessage{
+				a.writeJSON(ws.AgentMessage{
 					Type:        ws.MsgTypeJobProgress,
 					RunID:       runID,
 					Percent:     pct,
@@ -212,10 +241,15 @@ func (a *Agent) executeJob(runID string, job models.BackupJob) {
 		filename += ".enc"
 	}
 
-	backend, err := storage.NewBackend(
-		models.StorageTypeLocal, nil, runID,
-		a.cfg.ServerURL, a.cfg.APIKey,
-	)
+	// Determine storage backend from job dispatch
+	destType := storageType
+	destConfig := storageConfig
+	if destType == "" {
+		// Fallback to local if server didn't provide storage info
+		destType = models.StorageTypeLocal
+	}
+
+	backend, err := storage.NewBackend(destType, destConfig, runID, a.cfg.ServerURL, a.cfg.APIKey)
 	if err != nil {
 		a.sendFailure(runID, "storage backend: "+err.Error())
 		return
@@ -226,7 +260,7 @@ func (a *Agent) executeJob(runID string, job models.BackupJob) {
 		return
 	}
 
-	if err := a.conn.WriteJSON(ws.AgentMessage{
+	if err := a.writeJSON(ws.AgentMessage{
 		Type:        ws.MsgTypeJobDone,
 		RunID:       runID,
 		Status:      "success",
@@ -240,7 +274,7 @@ func (a *Agent) executeJob(runID string, job models.BackupJob) {
 }
 
 func (a *Agent) sendFailure(runID, errMsg string) {
-	if err := a.conn.WriteJSON(ws.AgentMessage{
+	if err := a.writeJSON(ws.AgentMessage{
 		Type:  ws.MsgTypeJobFailed,
 		RunID: runID,
 		Error: errMsg,

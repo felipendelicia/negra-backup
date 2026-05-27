@@ -2,17 +2,19 @@
 package scheduler
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
 
+	"github.com/felipendelicia/nat-backup/internal/crypto"
 	"github.com/felipendelicia/nat-backup/internal/models"
 	"github.com/jmoiron/sqlx"
 	"github.com/robfig/cron/v3"
 )
 
 type JobDispatcher interface {
-	DispatchJob(agentID, runID string, job models.BackupJob)
+	DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage)
 }
 
 type Scheduler struct {
@@ -21,14 +23,16 @@ type Scheduler struct {
 	dispatcher JobDispatcher
 	mu         sync.Mutex
 	entryIDs   map[string]cron.EntryID
+	encKey     string
 }
 
-func New(db *sqlx.DB, dispatcher JobDispatcher) *Scheduler {
+func New(db *sqlx.DB, dispatcher JobDispatcher, encKey string) *Scheduler {
 	return &Scheduler{
 		cron:       cron.New(),
 		db:         db,
 		dispatcher: dispatcher,
 		entryIDs:   make(map[string]cron.EntryID),
+		encKey:     encKey,
 	}
 }
 
@@ -93,16 +97,40 @@ func (s *Scheduler) triggerJob(job models.BackupJob) {
 	if s.db == nil {
 		return
 	}
+
 	var runID string
 	err := s.db.QueryRow(
-		`INSERT INTO backup_runs (job_id, status) VALUES ($1, 'running') RETURNING id`, job.ID,
+		`INSERT INTO backup_runs (job_id, status) VALUES ($1, 'running') RETURNING id`,
+		job.ID,
 	).Scan(&runID)
 	if err != nil {
 		log.Printf("scheduler create run for job %s: %v", job.ID, err)
 		return
 	}
+
+	// Fetch storage destination
+	var destType string
+	var encryptedConfig string
+	var storageType string
+	var storageConfig json.RawMessage
+
+	if err := s.db.QueryRow(
+		`SELECT type, config FROM storage_destinations WHERE id = $1`,
+		job.StorageDestinationID,
+	).Scan(&destType, &encryptedConfig); err != nil {
+		log.Printf("scheduler fetch storage for job %s: %v", job.ID, err)
+	} else if s.encKey != "" {
+		decrypted, decErr := crypto.Decrypt(s.encKey, encryptedConfig)
+		if decErr != nil {
+			log.Printf("scheduler decrypt storage for job %s: %v", job.ID, decErr)
+		} else {
+			storageType = destType
+			storageConfig = json.RawMessage(decrypted)
+		}
+	}
+
 	log.Printf("scheduler dispatching job %s (run %s) to agent %s", job.ID, runID, job.AgentID)
-	s.dispatcher.DispatchJob(job.AgentID.String(), runID, job)
+	s.dispatcher.DispatchJob(job.AgentID.String(), runID, job, storageType, storageConfig)
 }
 
 // ValidateCron returns an error if the cron expression is invalid.

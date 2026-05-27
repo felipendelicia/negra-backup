@@ -2,6 +2,7 @@
 package scheduler_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/felipendelicia/nat-backup/internal/models"
@@ -12,10 +13,11 @@ import (
 
 type mockDispatcher struct{}
 
-func (m *mockDispatcher) DispatchJob(agentID, runID string, job models.BackupJob) {}
+func (m *mockDispatcher) DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage) {
+}
 
 func TestScheduler_StartStop(t *testing.T) {
-	s := scheduler.New(nil, &mockDispatcher{})
+	s := scheduler.New(nil, &mockDispatcher{}, "")
 	s.Start()
 	s.Stop()
 }

@@ -8,19 +8,19 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+
+	"golang.org/x/crypto/pbkdf2"
 )
 
 const (
-	saltSize  = 32
-	chunkSize = 64 * 1024 // 64KB
+	saltSize   = 32
+	chunkSize  = 64 * 1024 // 64KB
+	pbkdf2Iter = 600_000
 )
 
-// deriveKey derives a 32-byte AES key from passphrase + salt using SHA-256.
+// deriveKey derives a 32-byte AES key from passphrase + salt using PBKDF2-SHA256.
 func deriveKey(passphrase string, salt []byte) []byte {
-	h := sha256.New()
-	h.Write(salt)
-	h.Write([]byte(passphrase))
-	return h.Sum(nil)
+	return pbkdf2.Key([]byte(passphrase), salt, pbkdf2Iter, 32, sha256.New)
 }
 
 // EncryptStream reads from r, encrypts with passphrase using chunk-based AES-256-GCM, writes to w.

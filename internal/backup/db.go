@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 // DBDumper runs a database dump and writes output to an io.Writer.
@@ -40,7 +41,7 @@ func (d *DBDumper) Dump(w io.Writer) (DumpResult, error) {
 }
 
 func (d *DBDumper) dumpPostgres(w io.Writer) (DumpResult, error) {
-	cmd := exec.Command("pg_dump", "--no-password", d.connString)
+	cmd := exec.Command("pg_dump", "--no-password", "--", d.connString)
 	cmd.Stdout = w
 	errPipe, _ := cmd.StderrPipe()
 
@@ -72,7 +73,11 @@ func (d *DBDumper) dumpMySQL(w io.Writer) (DumpResult, error) {
 }
 
 func (d *DBDumper) dumpSQLite(w io.Writer) (DumpResult, error) {
-	exec.Command("sqlite3", d.connString, "PRAGMA wal_checkpoint(FULL)").Run()
+	// Reject suspiciously flag-like paths
+	if strings.HasPrefix(d.connString, "-") {
+		return DumpResult{}, fmt.Errorf("invalid sqlite path: %q", d.connString)
+	}
+	exec.Command("sqlite3", d.connString, "PRAGMA wal_checkpoint(FULL)").Run() // best-effort; ignore error
 
 	f, err := os.Open(d.connString)
 	if err != nil {

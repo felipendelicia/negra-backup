@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -19,27 +18,41 @@ func NewLocalBackend(cfg LocalConfig) *LocalBackend {
 }
 
 func (b *LocalBackend) Upload(filename string, r io.Reader, size int64) error {
-	var body bytes.Buffer
-	mw := multipart.NewWriter(&body)
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	errCh := make(chan error, 1)
 
-	fw, err := mw.CreateFormFile("file", filename)
-	if err != nil {
-		return fmt.Errorf("create form file: %w", err)
-	}
-	if _, err := io.Copy(fw, r); err != nil {
-		return fmt.Errorf("copy to form: %w", err)
-	}
-	mw.Close()
+	go func() {
+		fw, err := mw.CreateFormFile("file", filename)
+		if err != nil {
+			pw.CloseWithError(fmt.Errorf("create form file: %w", err))
+			errCh <- err
+			return
+		}
+		if _, err := io.Copy(fw, r); err != nil {
+			pw.CloseWithError(fmt.Errorf("copy to form: %w", err))
+			errCh <- err
+			return
+		}
+		mw.Close()
+		pw.Close()
+		errCh <- nil
+	}()
 
 	url := fmt.Sprintf("%s/api/upload/%s", b.cfg.ServerURL, b.cfg.RunID)
-	req, err := http.NewRequest(http.MethodPost, url, &body)
+	req, err := http.NewRequest(http.MethodPost, url, pr)
 	if err != nil {
+		pw.CloseWithError(err)
 		return fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+b.cfg.APIKey)
+	// ContentLength unknown for streaming — chunked encoding (ContentLength = -1 is default)
 
 	resp, err := b.client.Do(req)
+	if writeErr := <-errCh; writeErr != nil && err == nil {
+		err = writeErr
+	}
 	if err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}

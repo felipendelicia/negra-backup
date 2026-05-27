@@ -1,7 +1,6 @@
 package backup
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -32,32 +31,47 @@ func BackupFiles(cfg FilesConfig, w io.Writer) (BackupResult, error) {
 	// Count files for progress tracking
 	var fileCount int
 	for _, path := range cfg.Paths {
-		filepath.WalkDir(path, func(_ string, d os.DirEntry, _ error) error {
+		if err := filepath.WalkDir(path, func(_ string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
 			if !d.IsDir() {
 				fileCount++
 			}
 			return nil
-		})
+		}); err != nil {
+			return BackupResult{}, fmt.Errorf("count files in %s: %w", path, err)
+		}
 	}
 
-	var compTarget io.Writer
-	var encBuf *bytes.Buffer
+	var totalBytes int64
+	var compErr error
 
 	if cfg.Encrypt && cfg.Passphrase != "" {
-		encBuf = &bytes.Buffer{}
-		compTarget = encBuf
-	} else {
-		compTarget = w
-	}
+		// Pipeline: TarCompress → pipe → EncryptStream → w
+		pr, pw := io.Pipe()
+		errCh := make(chan error, 1)
+		go func() {
+			n, err := TarCompress(cfg.Paths, pw, cfg.Compression)
+			totalBytes = n
+			if err != nil {
+				pw.CloseWithError(err)
+			} else {
+				pw.Close()
+			}
+			errCh <- err
+		}()
 
-	totalBytes, err := TarCompress(cfg.Paths, compTarget, cfg.Compression)
-	if err != nil {
-		return BackupResult{}, fmt.Errorf("compress: %w", err)
-	}
-
-	if cfg.Encrypt && cfg.Passphrase != "" {
-		if err := EncryptStream(encBuf, w, cfg.Passphrase); err != nil {
+		if err := EncryptStream(pr, w, cfg.Passphrase); err != nil {
 			return BackupResult{}, fmt.Errorf("encrypt: %w", err)
+		}
+		if err := <-errCh; err != nil {
+			return BackupResult{}, fmt.Errorf("compress: %w", err)
+		}
+	} else {
+		totalBytes, compErr = TarCompress(cfg.Paths, w, cfg.Compression)
+		if compErr != nil {
+			return BackupResult{}, fmt.Errorf("compress: %w", compErr)
 		}
 	}
 

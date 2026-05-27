@@ -168,7 +168,30 @@ func (s *Server) handleTriggerJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.hub != nil {
-		s.hub.DispatchJob(job.AgentID.String(), run.ID.String(), job)
+		// Fetch storage destination
+		var destType string
+		var encryptedConfig string
+		err := s.db.QueryRow(
+			`SELECT type, config FROM storage_destinations WHERE id = $1`,
+			job.StorageDestinationID,
+		).Scan(&destType, &encryptedConfig)
+
+		var storageType string
+		var storageConfig json.RawMessage
+
+		if err == nil {
+			decryptedConfig, decErr := crypto.Decrypt(s.cfg.EncryptionKey, encryptedConfig)
+			if decErr == nil {
+				storageType = destType
+				storageConfig = json.RawMessage(decryptedConfig)
+			} else {
+				log.Printf("decrypt storage config for job %s: %v", job.ID, decErr)
+			}
+		} else {
+			log.Printf("fetch storage destination for job %s: %v", job.ID, err)
+		}
+
+		s.hub.DispatchJob(job.AgentID.String(), run.ID.String(), job, storageType, storageConfig)
 	}
 	respond(w, http.StatusCreated, run)
 }

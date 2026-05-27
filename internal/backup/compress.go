@@ -18,9 +18,8 @@ const (
 
 // TarCompress creates a tar archive of all paths, compressed with the given algorithm.
 // Writes to w. Returns total uncompressed bytes read and any error.
-func TarCompress(paths []string, w io.Writer, compression string) (int64, error) {
+func TarCompress(paths []string, w io.Writer, compression string) (totalBytes int64, err error) {
 	var compWriter io.WriteCloser
-	var err error
 
 	switch compression {
 	case CompressionZstd:
@@ -34,17 +33,13 @@ func TarCompress(paths []string, w io.Writer, compression string) (int64, error)
 	default:
 		return 0, fmt.Errorf("unknown compression: %s", compression)
 	}
-	defer compWriter.Close()
 
 	tw := tar.NewWriter(compWriter)
-	defer tw.Close()
-
-	var totalBytes int64
 
 	for _, path := range paths {
-		if err = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
-			if err != nil {
-				return err
+		if walkErr := filepath.WalkDir(path, func(p string, d os.DirEntry, werr error) error {
+			if werr != nil {
+				return werr
 			}
 
 			info, err := d.Info()
@@ -63,24 +58,45 @@ func TarCompress(paths []string, w io.Writer, compression string) (int64, error)
 			}
 
 			if !d.IsDir() {
-				f, err := os.Open(p)
+				n, err := copyFile(tw, p)
 				if err != nil {
-					return fmt.Errorf("open %s: %w", p, err)
-				}
-				defer f.Close()
-
-				n, err := io.Copy(tw, f)
-				if err != nil {
-					return fmt.Errorf("copy %s: %w", p, err)
+					return err
 				}
 				totalBytes += n
 			}
 
 			return nil
-		}); err != nil {
-			return totalBytes, fmt.Errorf("walk %s: %w", path, err)
+		}); walkErr != nil {
+			// Close on error (best-effort)
+			tw.Close()
+			compWriter.Close()
+			return totalBytes, fmt.Errorf("walk %s: %w", path, walkErr)
 		}
 	}
 
+	// Close in order: tar first, then compressor (flushes trailer)
+	if closeErr := tw.Close(); closeErr != nil {
+		compWriter.Close()
+		return totalBytes, fmt.Errorf("tar close: %w", closeErr)
+	}
+	if closeErr := compWriter.Close(); closeErr != nil {
+		return totalBytes, fmt.Errorf("compress close: %w", closeErr)
+	}
+
 	return totalBytes, nil
+}
+
+// copyFile copies a single file into the tar writer, closing the file after.
+func copyFile(tw *tar.Writer, path string) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	n, err := io.Copy(tw, f)
+	if err != nil {
+		return n, fmt.Errorf("copy %s: %w", path, err)
+	}
+	return n, nil
 }

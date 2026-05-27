@@ -91,7 +91,7 @@ func (h *Hub) IsConnected(agentID string) bool {
 	return ok
 }
 
-func (h *Hub) DispatchJob(agentID, runID string, job models.BackupJob) {
+func (h *Hub) DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage) {
 	h.mu.RLock()
 	ac, ok := h.agents[agentID]
 	h.mu.RUnlock()
@@ -99,12 +99,20 @@ func (h *Hub) DispatchJob(agentID, runID string, job models.BackupJob) {
 		log.Printf("dispatch: agent %s not connected", agentID)
 		return
 	}
-	msg := ServerMessage{Type: MsgTypeRunJob, RunID: runID, Job: &job}
+
+	msg := ServerMessage{
+		Type:          MsgTypeRunJob,
+		RunID:         runID,
+		Job:           &job,
+		StorageType:   storageType,
+		StorageConfig: storageConfig,
+	}
 	data, err := json.Marshal(msg)
 	if err != nil {
 		log.Printf("dispatch marshal: %v", err)
 		return
 	}
+
 	select {
 	case ac.send <- data:
 	default:

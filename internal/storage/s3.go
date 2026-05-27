@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
+	"path"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -32,8 +32,9 @@ func NewS3Backend(cfg models.S3StorageConfig) (*S3Backend, error) {
 
 	var opts []func(*s3.Options)
 	if cfg.Endpoint != "" {
+		endpoint := cfg.Endpoint
 		opts = append(opts, func(o *s3.Options) {
-			o.BaseEndpoint = aws.String(cfg.Endpoint)
+			o.EndpointResolver = s3.EndpointResolverFromURL(endpoint)
 			o.UsePathStyle = true
 		})
 	}
@@ -43,13 +44,13 @@ func NewS3Backend(cfg models.S3StorageConfig) (*S3Backend, error) {
 }
 
 func (b *S3Backend) Upload(filename string, r io.Reader, size int64) error {
-	key := filepath.Join("nat-backup", filename)
+	key := path.Join("nat-backup", filename)
 
 	_, err := b.client.PutObject(context.Background(), &s3.PutObjectInput{
 		Bucket:        aws.String(b.cfg.Bucket),
 		Key:           aws.String(key),
 		Body:          r,
-		ContentLength: aws.Int64(size),
+		ContentLength: size,
 	})
 	if err != nil {
 		return fmt.Errorf("s3 put object: %w", err)
