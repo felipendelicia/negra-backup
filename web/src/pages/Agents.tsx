@@ -38,7 +38,7 @@ export default function Agents() {
           {isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
           {isError && <p className="text-sm text-destructive">Failed to load data. Please refresh.</p>}
           {!isLoading && agents.length === 0 && (
-            <p className="text-sm text-muted-foreground">No agents registered yet. Install the nat-backup-agent on your machines.</p>
+            <p className="text-sm text-muted-foreground">No agents registered yet. Install the negra-backup-agent on your machines.</p>
           )}
           <div className="space-y-3">
             {agents.map(agent => (

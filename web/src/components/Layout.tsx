@@ -30,7 +30,7 @@ export default function Layout() {
     <div className="flex h-screen bg-background">
       <aside className="w-56 border-r flex flex-col">
         <div className="p-4 border-b">
-          <h1 className="font-bold text-lg">nat-backup</h1>
+          <h1 className="font-bold text-lg">Negra Backup</h1>
         </div>
         <nav className="flex-1 p-2 space-y-1">
           {nav.map(({ to, icon: Icon, label }) => (

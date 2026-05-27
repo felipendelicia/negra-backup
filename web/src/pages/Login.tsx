@@ -34,7 +34,7 @@ export default function Login() {
     <div className="flex items-center justify-center min-h-screen bg-muted">
       <Card className="w-96">
         <CardHeader>
-          <CardTitle className="text-2xl text-center">nat-backup</CardTitle>
+          <CardTitle className="text-2xl text-center">Negra Backup</CardTitle>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">

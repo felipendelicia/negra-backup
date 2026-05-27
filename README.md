@@ -1,4 +1,4 @@
-# nat-backup
+# Negra Backup
 
 Gestor de backups self-hosted. Un servidor central orquesta agentes que corren en tus máquinas — los agentes ejecutan los backups y suben los archivos a los destinos de almacenamiento configurados.
 
