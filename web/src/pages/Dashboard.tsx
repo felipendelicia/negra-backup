@@ -7,9 +7,9 @@ import { formatDate, formatBytes } from 'src/lib/utils'
 import { Server, Briefcase, CheckCircle, XCircle } from 'lucide-react'
 
 export default function Dashboard() {
-  const { data: agents = [] } = useQuery({ queryKey: ['agents'], queryFn: api.listAgents })
-  const { data: jobs = [] } = useQuery({ queryKey: ['jobs'], queryFn: api.listJobs })
-  const { data: runs = [] } = useQuery({ queryKey: ['runs'], queryFn: () => api.listRuns() })
+  const { data: agents = [] } = useQuery({ queryKey: ['agents'], queryFn: ({ signal }) => api.listAgents(signal) })
+  const { data: jobs = [] } = useQuery({ queryKey: ['jobs'], queryFn: ({ signal }) => api.listJobs(signal) })
+  const { data: runs = [], isError: runsError } = useQuery({ queryKey: ['runs'], queryFn: ({ signal }) => api.listRuns(undefined, signal) })
 
   const onlineAgents = agents.filter(a => a.status === 'online').length
   const enabledJobs = jobs.filter(j => j.enabled).length
@@ -20,7 +20,7 @@ export default function Dashboard() {
     const d = new Date()
     d.setDate(d.getDate() - (6 - i))
     const key = d.toISOString().slice(0, 10)
-    const dayRuns = runs.filter(r => r.started_at.startsWith(key))
+    const dayRuns = runs.filter(r => r.started_at?.startsWith(key))
     return {
       date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
       success: dayRuns.filter(r => r.status === 'success').length,
@@ -33,6 +33,7 @@ export default function Dashboard() {
   return (
     <div className="space-y-6">
       <h2 className="text-2xl font-bold">Dashboard</h2>
+      {runsError && <p className="text-sm text-destructive">Failed to load run data. Please refresh.</p>}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">

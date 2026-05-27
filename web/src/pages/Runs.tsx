@@ -24,8 +24,7 @@ function useLiveLogs(run: BackupRun | null) {
     setLogs([])
 
     if (run.status !== 'running') {
-      // Fetch static logs via REST
-      api.listRuns({ job_id: run.job_id }).catch(() => null)
+      // No live logs for completed runs
       return
     }
 
@@ -61,18 +60,18 @@ export default function Runs() {
   const [filterStatus, setFilterStatus] = useState<string>('')
   const logsEndRef = useRef<HTMLDivElement>(null)
 
-  const { data: runs = [], isLoading } = useQuery({
+  const { data: runs = [], isLoading, isError } = useQuery({
     queryKey: ['runs'],
-    queryFn: () => api.listRuns(),
+    queryFn: ({ signal }) => api.listRuns(undefined, signal),
     refetchInterval: 5_000,
   })
 
-  const { data: jobs = [] } = useQuery({ queryKey: ['jobs'], queryFn: api.listJobs })
+  const { data: jobs = [] } = useQuery({ queryKey: ['jobs'], queryFn: ({ signal }) => api.listJobs(signal) })
 
   const { logs, connected } = useLiveLogs(selectedRun)
 
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    logsEndRef.current?.scrollIntoView({ behavior: 'auto' })
   }, [logs])
 
   const filtered = filterStatus ? runs.filter(r => r.status === filterStatus) : runs
@@ -99,6 +98,7 @@ export default function Runs() {
         <CardHeader><CardTitle>Runs</CardTitle></CardHeader>
         <CardContent>
           {isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
+          {isError && <p className="text-sm text-destructive">Failed to load data. Please refresh.</p>}
           {!isLoading && filtered.length === 0 && (
             <p className="text-sm text-muted-foreground">No runs found.</p>
           )}

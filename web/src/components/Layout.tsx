@@ -1,6 +1,7 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from 'src/lib/auth'
 import { Button } from 'src/components/ui/button'
+import { ErrorBoundary } from 'src/components/ErrorBoundary'
 import {
   LayoutDashboard, Server, Briefcase, History,
   Database, Settings, LogOut
@@ -58,7 +59,9 @@ export default function Layout() {
         </div>
       </aside>
       <main className="flex-1 overflow-auto p-6">
-        <Outlet />
+        <ErrorBoundary>
+          <Outlet />
+        </ErrorBoundary>
       </main>
     </div>
   )

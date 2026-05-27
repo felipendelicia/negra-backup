@@ -93,12 +93,12 @@ export default function Jobs() {
   const [customCron, setCustomCron] = useState(false)
   const [formError, setFormError] = useState('')
 
-  const { data: jobs = [], isLoading } = useQuery({
+  const { data: jobs = [], isLoading, isError } = useQuery({
     queryKey: ['jobs'],
-    queryFn: api.listJobs,
+    queryFn: ({ signal }) => api.listJobs(signal),
   })
-  const { data: agents = [] } = useQuery({ queryKey: ['agents'], queryFn: api.listAgents })
-  const { data: storage = [] } = useQuery({ queryKey: ['storage'], queryFn: api.listStorage })
+  const { data: agents = [] } = useQuery({ queryKey: ['agents'], queryFn: ({ signal }) => api.listAgents(signal) })
+  const { data: storage = [] } = useQuery({ queryKey: ['storage'], queryFn: ({ signal }) => api.listStorage(signal) })
 
   const createMut = useMutation({
     mutationFn: (data: CreateJobRequest) => api.createJob(data),
@@ -187,6 +187,7 @@ export default function Jobs() {
         <CardHeader><CardTitle>Jobs</CardTitle></CardHeader>
         <CardContent>
           {isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
+          {isError && <p className="text-sm text-destructive">Failed to load data. Please refresh.</p>}
           {!isLoading && jobs.length === 0 && (
             <p className="text-sm text-muted-foreground">No jobs yet. Create one to start backing up.</p>
           )}

@@ -22,18 +22,21 @@ export default function Settings() {
   const [config, setConfig] = useState<EmailNotificationConfig>(defaultConfig())
   const [toStr, setToStr] = useState('')
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle')
+  const [errorMsg, setErrorMsg] = useState('')
+  const [initialized, setInitialized] = useState(false)
 
-  const { data: settings } = useQuery({
+  const { data: settings, isError } = useQuery({
     queryKey: ['notification-settings'],
-    queryFn: api.getNotificationSettings,
+    queryFn: ({ signal }) => api.getNotificationSettings(signal),
   })
 
   useEffect(() => {
-    if (settings && 'type' in settings && settings.type === 'email') {
-      setConfig(settings.config)
-      setToStr(settings.config.to.join(', '))
+    if (!initialized && settings && 'type' in settings && settings.type === 'email') {
+      setConfig(settings.config as EmailNotificationConfig)
+      setToStr((settings.config as EmailNotificationConfig).to.join(', '))
+      setInitialized(true)
     }
-  }, [settings])
+  }, [initialized, settings])
 
   const saveMut = useMutation({
     mutationFn: (data: { type: string; config: EmailNotificationConfig }) =>
@@ -42,9 +45,10 @@ export default function Settings() {
       setSaveStatus('saved')
       setTimeout(() => setSaveStatus('idle'), 3000)
     },
-    onError: () => {
+    onError: (e: Error) => {
       setSaveStatus('error')
-      setTimeout(() => setSaveStatus('idle'), 3000)
+      setErrorMsg(e.message)
+      setTimeout(() => setSaveStatus('idle'), 5000)
     },
   })
 
@@ -66,6 +70,7 @@ export default function Settings() {
           <CardTitle>Email Notifications</CardTitle>
         </CardHeader>
         <CardContent>
+          {isError && <p className="text-sm text-destructive mb-4">Failed to load data. Please refresh.</p>}
           <form onSubmit={handleSubmit} className="space-y-4 max-w-lg">
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
@@ -144,7 +149,7 @@ export default function Settings() {
                 {saveMut.isPending ? 'Saving...' : 'Save Settings'}
               </Button>
               {saveStatus === 'saved' && <span className="text-sm text-green-600">Saved successfully</span>}
-              {saveStatus === 'error' && <span className="text-sm text-destructive">Save failed</span>}
+              {saveStatus === 'error' && <span className="text-sm text-destructive">{errorMsg || 'Save failed'}</span>}
             </div>
           </form>
         </CardContent>

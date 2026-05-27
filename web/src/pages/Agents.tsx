@@ -13,9 +13,9 @@ export default function Agents() {
   const qc = useQueryClient()
   const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null)
 
-  const { data: agents = [], isLoading } = useQuery({
+  const { data: agents = [], isLoading, isError } = useQuery({
     queryKey: ['agents'],
-    queryFn: api.listAgents,
+    queryFn: ({ signal }) => api.listAgents(signal),
     refetchInterval: 10_000,
   })
 
@@ -36,6 +36,7 @@ export default function Agents() {
         </CardHeader>
         <CardContent>
           {isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
+          {isError && <p className="text-sm text-destructive">Failed to load data. Please refresh.</p>}
           {!isLoading && agents.length === 0 && (
             <p className="text-sm text-muted-foreground">No agents registered yet. Install the nat-backup-agent on your machines.</p>
           )}

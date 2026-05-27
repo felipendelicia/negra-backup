@@ -13,7 +13,7 @@ export class APIError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const token = getToken()
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -26,9 +26,14 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   })
 
   if (!res.ok) {
+    if (res.status === 401) {
+      localStorage.removeItem('nat_backup_token')
+      window.location.href = '/login'
+    }
     const err = await res.json().catch(() => ({ error: res.statusText }))
     throw new APIError(res.status, (err as { error?: string }).error || res.statusText)
   }
@@ -41,30 +46,33 @@ export const api = {
   login: (username: string, password: string) =>
     request<{ token: string }>('POST', '/api/auth/login', { username, password }),
 
-  listAgents: () => request<Agent[]>('GET', '/api/agents'),
+  listAgents: (signal?: AbortSignal) => request<Agent[]>('GET', '/api/agents', undefined, signal),
   deleteAgent: (id: string) => request<void>('DELETE', `/api/agents/${id}`),
 
-  listStorage: () => request<StorageDestination[]>('GET', '/api/storage-destinations'),
+  listStorage: (signal?: AbortSignal) => request<StorageDestination[]>('GET', '/api/storage-destinations', undefined, signal),
   createStorage: (data: CreateStorageRequest) =>
     request<StorageDestination>('POST', '/api/storage-destinations', data),
   updateStorage: (id: string, data: CreateStorageRequest) =>
     request<void>('PUT', `/api/storage-destinations/${id}`, data),
   deleteStorage: (id: string) => request<void>('DELETE', `/api/storage-destinations/${id}`),
 
-  listJobs: () => request<BackupJob[]>('GET', '/api/jobs'),
+  listJobs: (signal?: AbortSignal) => request<BackupJob[]>('GET', '/api/jobs', undefined, signal),
   createJob: (data: CreateJobRequest) => request<BackupJob>('POST', '/api/jobs', data),
   updateJob: (id: string, data: CreateJobRequest) =>
     request<void>('PUT', `/api/jobs/${id}`, data),
   deleteJob: (id: string) => request<void>('DELETE', `/api/jobs/${id}`),
   triggerJob: (id: string) => request<BackupRun>('POST', `/api/jobs/${id}/run`),
 
-  listRuns: (params?: { job_id?: string; status?: string }) => {
-    const qs = params ? new URLSearchParams(params as Record<string, string>).toString() : ''
-    return request<BackupRun[]>('GET', `/api/runs${qs ? '?' + qs : ''}`)
+  listRuns: (params?: { job_id?: string; status?: string }, signal?: AbortSignal) => {
+    const filtered = params ? Object.fromEntries(
+      Object.entries(params).filter(([, v]) => v !== undefined)
+    ) : {}
+    const qs = Object.keys(filtered).length ? new URLSearchParams(filtered as Record<string, string>).toString() : ''
+    return request<BackupRun[]>('GET', `/api/runs${qs ? '?' + qs : ''}`, undefined, signal)
   },
 
-  getNotificationSettings: () =>
-    request<NotificationSettings | { configured: false }>('GET', '/api/settings/notifications'),
+  getNotificationSettings: (signal?: AbortSignal) =>
+    request<NotificationSettings | { configured: false }>('GET', '/api/settings/notifications', undefined, signal),
   updateNotificationSettings: (data: { type: string; config: EmailNotificationConfig }) =>
     request<void>('PUT', '/api/settings/notifications', data),
 }

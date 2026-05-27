@@ -80,9 +80,9 @@ export default function Storage() {
   const [deleteTarget, setDeleteTarget] = useState<StorageDestination | null>(null)
   const [formError, setFormError] = useState('')
 
-  const { data: storage = [], isLoading } = useQuery({
+  const { data: storage = [], isLoading, isError } = useQuery({
     queryKey: ['storage'],
-    queryFn: api.listStorage,
+    queryFn: ({ signal }) => api.listStorage(signal),
   })
 
   const createMut = useMutation({
@@ -148,6 +148,7 @@ export default function Storage() {
         <CardHeader><CardTitle>Destinations</CardTitle></CardHeader>
         <CardContent>
           {isLoading && <p className="text-sm text-muted-foreground">Loading...</p>}
+          {isError && <p className="text-sm text-destructive">Failed to load data. Please refresh.</p>}
           {!isLoading && storage.length === 0 && (
             <p className="text-sm text-muted-foreground">No storage destinations configured. Add one to enable backups.</p>
           )}

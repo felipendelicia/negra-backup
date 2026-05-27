@@ -21,5 +21,6 @@ func TestServer_ServesStaticFile(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	assert.NotEqual(t, http.StatusInternalServerError, w.Code)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "<div id=\"root\">")
 }
