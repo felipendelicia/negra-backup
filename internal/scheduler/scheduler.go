@@ -1,0 +1,105 @@
+// internal/scheduler/scheduler.go
+package scheduler
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/felipendelicia/nat-backup/internal/models"
+	"github.com/jmoiron/sqlx"
+	"github.com/robfig/cron/v3"
+)
+
+type JobDispatcher interface {
+	DispatchJob(agentID, runID string, job models.BackupJob)
+}
+
+type Scheduler struct {
+	cron       *cron.Cron
+	db         *sqlx.DB
+	dispatcher JobDispatcher
+	entryIDs   map[string]cron.EntryID
+}
+
+func New(db *sqlx.DB, dispatcher JobDispatcher) *Scheduler {
+	return &Scheduler{
+		cron:       cron.New(),
+		db:         db,
+		dispatcher: dispatcher,
+		entryIDs:   make(map[string]cron.EntryID),
+	}
+}
+
+func (s *Scheduler) Start() {
+	if s.db != nil {
+		s.loadJobs()
+	}
+	s.cron.Start()
+	log.Println("scheduler started")
+}
+
+func (s *Scheduler) Stop() {
+	s.cron.Stop()
+}
+
+func (s *Scheduler) loadJobs() {
+	var jobs []models.BackupJob
+	if err := s.db.Select(&jobs, `SELECT * FROM backup_jobs WHERE enabled=true`); err != nil {
+		log.Printf("scheduler load jobs: %v", err)
+		return
+	}
+	for _, job := range jobs {
+		if err := s.AddJob(job); err != nil {
+			log.Printf("scheduler add job %s: %v", job.ID, err)
+		}
+	}
+	log.Printf("scheduler loaded %d jobs", len(jobs))
+}
+
+func (s *Scheduler) AddJob(job models.BackupJob) error {
+	if id, ok := s.entryIDs[job.ID.String()]; ok {
+		s.cron.Remove(id)
+		delete(s.entryIDs, job.ID.String())
+	}
+	if !job.Enabled {
+		return nil
+	}
+	entryID, err := s.cron.AddFunc(job.ScheduleCron, func() {
+		s.triggerJob(job)
+	})
+	if err != nil {
+		return fmt.Errorf("cron add: %w", err)
+	}
+	s.entryIDs[job.ID.String()] = entryID
+	return nil
+}
+
+func (s *Scheduler) RemoveJob(jobID string) {
+	if id, ok := s.entryIDs[jobID]; ok {
+		s.cron.Remove(id)
+		delete(s.entryIDs, jobID)
+	}
+}
+
+func (s *Scheduler) triggerJob(job models.BackupJob) {
+	if s.db == nil {
+		return
+	}
+	var runID string
+	err := s.db.QueryRow(
+		`INSERT INTO backup_runs (job_id, status) VALUES ($1, 'running') RETURNING id`, job.ID,
+	).Scan(&runID)
+	if err != nil {
+		log.Printf("scheduler create run for job %s: %v", job.ID, err)
+		return
+	}
+	log.Printf("scheduler dispatching job %s (run %s) to agent %s", job.ID, runID, job.AgentID)
+	s.dispatcher.DispatchJob(job.AgentID.String(), runID, job)
+}
+
+// ValidateCron returns an error if the cron expression is invalid.
+func ValidateCron(expr string) error {
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	_, err := parser.Parse(expr)
+	return err
+}

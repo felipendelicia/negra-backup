@@ -14,6 +14,7 @@ import (
 	"github.com/felipendelicia/nat-backup/internal/api"
 	"github.com/felipendelicia/nat-backup/internal/config"
 	"github.com/felipendelicia/nat-backup/internal/db"
+	"github.com/felipendelicia/nat-backup/internal/scheduler"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -43,7 +44,11 @@ func main() {
 		string(hash),
 	)
 
-	handler, _ := api.NewServer(pool, cfg)
+	handler, hub := api.NewServer(pool, cfg)
+
+	sched := scheduler.New(pool, hub)
+	sched.Start()
+	defer sched.Stop()
 
 	addr := ":" + cfg.Port
 	srv := &http.Server{
