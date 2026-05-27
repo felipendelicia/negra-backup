@@ -11,7 +11,7 @@ import (
 )
 
 func TestListAgents_NoAuth(t *testing.T) {
-	srv := api.NewServer(nil, testConfig())
+	srv, _ := api.NewServer(nil, testConfig())
 	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)

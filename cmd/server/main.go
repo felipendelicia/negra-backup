@@ -43,7 +43,7 @@ func main() {
 		string(hash),
 	)
 
-	handler := api.NewServer(pool, cfg)
+	handler, _ := api.NewServer(pool, cfg)
 
 	addr := ":" + cfg.Port
 	srv := &http.Server{

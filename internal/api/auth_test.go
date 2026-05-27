@@ -22,7 +22,7 @@ func testConfig() config.Config {
 
 func TestLogin_NoDB_Returns401(t *testing.T) {
 	// When DB is nil, login fails because it can't query admin_users
-	srv := api.NewServer(nil, testConfig())
+	srv, _ := api.NewServer(nil, testConfig())
 	body, _ := json.Marshal(map[string]string{"username": "admin", "password": "admin"})
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -33,7 +33,7 @@ func TestLogin_NoDB_Returns401(t *testing.T) {
 }
 
 func TestJWTMiddleware_NoToken_Returns401(t *testing.T) {
-	srv := api.NewServer(nil, testConfig())
+	srv, _ := api.NewServer(nil, testConfig())
 	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -41,7 +41,7 @@ func TestJWTMiddleware_NoToken_Returns401(t *testing.T) {
 }
 
 func TestJWTMiddleware_InvalidToken_Returns401(t *testing.T) {
-	srv := api.NewServer(nil, testConfig())
+	srv, _ := api.NewServer(nil, testConfig())
 	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
 	req.Header.Set("Authorization", "Bearer invalid.token.here")
 	w := httptest.NewRecorder()

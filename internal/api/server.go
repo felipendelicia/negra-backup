@@ -6,31 +6,33 @@ import (
 	"net/http"
 
 	"github.com/felipendelicia/nat-backup/internal/config"
-	"github.com/felipendelicia/nat-backup/internal/models"
+	"github.com/felipendelicia/nat-backup/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jmoiron/sqlx"
 )
 
-// jobDispatcher is implemented by ws.Hub. Defined here to avoid circular import.
-type jobDispatcher interface {
-	DispatchJob(agentID, runID string, job models.BackupJob)
-}
-
 type Server struct {
 	router    chi.Router
 	db        *sqlx.DB
 	cfg       config.Config
-	hub       jobDispatcher
+	hub       *ws.Hub
 	wsHandler http.Handler
 }
 
-// NewServer creates the HTTP server. hub and wsHandler are wired in Plan 3.
-// For now they can be nil — the WS endpoint will be added in Plan 3.
-func NewServer(db *sqlx.DB, cfg config.Config) http.Handler {
-	s := &Server{db: db, cfg: cfg}
+// NewServer creates the HTTP handler and returns the hub for use by the scheduler.
+func NewServer(db *sqlx.DB, cfg config.Config) (http.Handler, *ws.Hub) {
+	hub := ws.NewHub(db)
+	go hub.Run()
+
+	s := &Server{
+		db:        db,
+		cfg:       cfg,
+		hub:       hub,
+		wsHandler: ws.NewAgentHandler(hub),
+	}
 	s.router = s.buildRouter()
-	return s
+	return s, hub
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -46,6 +48,9 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+
+	// WebSocket for agents (auth via hello message)
+	r.Get("/ws/agent", s.wsHandler.ServeHTTP)
 
 	r.Post("/api/auth/login", s.handleLogin)
 
