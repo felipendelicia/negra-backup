@@ -62,24 +62,29 @@ function SourceFields({
   }
 
   if (type === 'files') {
-    return field('path', 'Source Path', '/var/data')
-  }
-  if (type === 'sqlite') {
-    return field('path', 'Database File Path', '/var/db/app.db')
-  }
-  if (type === 'postgres' || type === 'mysql') {
+    // paths is stored as array; UI shows comma-separated string
+    const pathsVal = Array.isArray(source['paths'])
+      ? (source['paths'] as string[]).join(', ')
+      : (source['paths'] as string) ?? ''
     return (
-      <>
-        {field('host', 'Host', 'localhost')}
-        {field('port', 'Port', type === 'postgres' ? '5432' : '3306')}
-        {field('database', 'Database')}
-        {field('username', 'Username')}
-        {field('password', 'Password')}
-      </>
+      <div className="space-y-1">
+        <Label>Source Paths <span className="text-xs text-muted-foreground">(comma-separated)</span></Label>
+        <Input
+          value={pathsVal}
+          placeholder="/home/user/documents, /var/data"
+          onChange={e => {
+            const arr = e.target.value.split(',').map(s => s.trim()).filter(Boolean)
+            onChange({ paths: arr })
+          }}
+        />
+      </div>
     )
   }
-  if (type === 'mongodb') {
-    return field('uri', 'MongoDB URI', 'mongodb://localhost:27017/mydb')
+  if (type === 'sqlite') {
+    return field('conn_string', 'Database File Path', '/var/db/app.db')
+  }
+  if (type === 'postgres' || type === 'mysql' || type === 'mongodb') {
+    return field('conn_string', 'Connection String', type === 'mongodb' ? 'mongodb://localhost:27017/mydb' : 'postgresql://user:pass@localhost/dbname')
   }
   return null
 }
