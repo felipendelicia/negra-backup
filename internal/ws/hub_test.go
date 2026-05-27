@@ -14,11 +14,11 @@ func TestHub_RegisterUnregister(t *testing.T) {
 	hub := ws.NewHub(nil)
 	go hub.Run()
 
-	hub.Register("agent-1", nil)
-	time.Sleep(10 * time.Millisecond)
+	ac := hub.Register("agent-1", nil)
+	time.Sleep(10 * time.Millisecond) // allow Run to process
 	assert.True(t, hub.IsConnected("agent-1"))
 
-	hub.Unregister("agent-1")
+	hub.Unregister(ac)
 	time.Sleep(20 * time.Millisecond)
 	assert.False(t, hub.IsConnected("agent-1"))
 }

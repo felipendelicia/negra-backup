@@ -4,6 +4,7 @@ package scheduler
 import (
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/felipendelicia/nat-backup/internal/models"
 	"github.com/jmoiron/sqlx"
@@ -18,6 +19,7 @@ type Scheduler struct {
 	cron       *cron.Cron
 	db         *sqlx.DB
 	dispatcher JobDispatcher
+	mu         sync.Mutex
 	entryIDs   map[string]cron.EntryID
 }
 
@@ -57,6 +59,9 @@ func (s *Scheduler) loadJobs() {
 }
 
 func (s *Scheduler) AddJob(job models.BackupJob) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if id, ok := s.entryIDs[job.ID.String()]; ok {
 		s.cron.Remove(id)
 		delete(s.entryIDs, job.ID.String())
@@ -75,6 +80,9 @@ func (s *Scheduler) AddJob(job models.BackupJob) error {
 }
 
 func (s *Scheduler) RemoveJob(jobID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if id, ok := s.entryIDs[jobID]; ok {
 		s.cron.Remove(id)
 		delete(s.entryIDs, jobID)

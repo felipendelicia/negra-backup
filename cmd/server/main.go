@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -52,9 +53,15 @@ func main() {
 	// Wire email notifier if notification settings exist in DB.
 	var emailSender *notify.EmailSender
 	var nsRaw []byte
-	if err := pool.QueryRow(`SELECT config FROM notification_settings WHERE type='email' LIMIT 1`).Scan(&nsRaw); err == nil {
+	if err := pool.QueryRow(`SELECT config FROM notification_settings WHERE type='email' LIMIT 1`).Scan(&nsRaw); err != nil {
+		if err != sql.ErrNoRows {
+			log.Printf("loading notification settings: %v", err)
+		}
+	} else {
 		var emailCfg models.EmailNotificationConfig
-		if json.Unmarshal(nsRaw, &emailCfg) == nil {
+		if err := json.Unmarshal(nsRaw, &emailCfg); err != nil {
+			log.Printf("parsing notification settings: %v", err)
+		} else {
 			emailSender = notify.NewEmailSender(emailCfg)
 		}
 	}
@@ -98,6 +105,8 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	srv.Shutdown(ctx)
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("server shutdown: %v", err)
+	}
 	fmt.Println("server stopped")
 }

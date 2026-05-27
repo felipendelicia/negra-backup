@@ -12,7 +12,8 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-type agentConn struct {
+// AgentConn holds the state for a single agent WebSocket connection.
+type AgentConn struct {
 	conn    *websocket.Conn
 	agentID string
 	send    chan []byte
@@ -20,22 +21,22 @@ type agentConn struct {
 
 type Hub struct {
 	mu      sync.RWMutex
-	agents  map[string]*agentConn
+	agents  map[string]*AgentConn
 
 	logMu   sync.RWMutex
 	logSubs map[string][]chan string
 
-	register   chan *agentConn
-	unregister chan string
+	register   chan *AgentConn
+	unregister chan *AgentConn
 	db         *sqlx.DB
 }
 
 func NewHub(db *sqlx.DB) *Hub {
 	return &Hub{
-		agents:     make(map[string]*agentConn),
+		agents:     make(map[string]*AgentConn),
 		logSubs:    make(map[string][]chan string),
-		register:   make(chan *agentConn, 16),
-		unregister: make(chan string, 16),
+		register:   make(chan *AgentConn, 16),
+		unregister: make(chan *AgentConn, 16),
 		db:         db,
 	}
 }
@@ -43,37 +44,44 @@ func NewHub(db *sqlx.DB) *Hub {
 func (h *Hub) Run() {
 	for {
 		select {
-		case agent := <-h.register:
+		case ac := <-h.register:
 			h.mu.Lock()
-			h.agents[agent.agentID] = agent
+			h.agents[ac.agentID] = ac
 			h.mu.Unlock()
-			log.Printf("agent %s connected", agent.agentID)
+			log.Printf("agent %s connected", ac.agentID)
 
-		case agentID := <-h.unregister:
+		case ac := <-h.unregister:
 			h.mu.Lock()
-			if agent, ok := h.agents[agentID]; ok {
-				close(agent.send)
-				delete(h.agents, agentID)
+			if current, ok := h.agents[ac.agentID]; ok && current == ac {
+				close(current.send)
+				delete(h.agents, ac.agentID)
 			}
 			h.mu.Unlock()
 			if h.db != nil {
-				h.db.Exec(`UPDATE agents SET status='offline' WHERE id=$1`, agentID)
+				if _, err := h.db.Exec(`UPDATE agents SET status='offline' WHERE id=$1`, ac.agentID); err != nil {
+					log.Printf("db update agent offline: %v", err)
+				}
 			}
-			log.Printf("agent %s disconnected", agentID)
+			log.Printf("agent %s disconnected", ac.agentID)
 		}
 	}
 }
 
-func (h *Hub) Register(agentID string, conn *websocket.Conn) {
-	ac := &agentConn{conn: conn, agentID: agentID, send: make(chan []byte, 64)}
+// Register adds an agent connection and returns the AgentConn handle.
+// Pass the returned handle to Unregister to avoid the reconnect race.
+func (h *Hub) Register(agentID string, conn *websocket.Conn) *AgentConn {
+	ac := &AgentConn{conn: conn, agentID: agentID, send: make(chan []byte, 64)}
 	h.register <- ac
 	if conn != nil {
 		go ac.writePump()
 	}
+	return ac
 }
 
-func (h *Hub) Unregister(agentID string) {
-	h.unregister <- agentID
+// Unregister removes the specific agent connection by pointer identity,
+// preventing a stale unregister from closing a newer connection for the same agent.
+func (h *Hub) Unregister(ac *AgentConn) {
+	h.unregister <- ac
 }
 
 func (h *Hub) IsConnected(agentID string) bool {
@@ -144,7 +152,7 @@ func (h *Hub) UnsubscribeRunLogs(runID string, ch chan string) {
 	close(ch)
 }
 
-func (ac *agentConn) writePump() {
+func (ac *AgentConn) writePump() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	defer ac.conn.Close()

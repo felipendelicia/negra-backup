@@ -28,12 +28,19 @@ func (e *EmailSender) SendFailureAlert(jobName, agentName, runID, errMsg string)
 	return e.send(subject, body)
 }
 
+// sanitizeHeader removes CR and LF to prevent email header injection.
+func sanitizeHeader(s string) string {
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\n", "")
+	return s
+}
+
 func (e *EmailSender) send(subject, body string) error {
 	msg := []byte(fmt.Sprintf(
 		"From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s",
-		e.cfg.From,
-		strings.Join(e.cfg.To, ", "),
-		subject,
+		sanitizeHeader(e.cfg.From),
+		sanitizeHeader(strings.Join(e.cfg.To, ", ")),
+		sanitizeHeader(subject),
 		body,
 	))
 	addr := fmt.Sprintf("%s:%d", e.cfg.SMTPHost, e.cfg.SMTPPort)
@@ -78,5 +85,8 @@ func (e *EmailSender) sendTLS(addr string, auth smtp.Auth, msg []byte) error {
 	if _, err := w.Write(msg); err != nil {
 		return fmt.Errorf("smtp write: %w", err)
 	}
-	return w.Close()
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("smtp data close: %w", err)
+	}
+	return client.Quit()
 }

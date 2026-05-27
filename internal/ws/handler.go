@@ -2,6 +2,7 @@
 package ws
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -66,14 +67,16 @@ func (h *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.db != nil {
-		h.db.Exec(
+		if _, err := h.db.Exec(
 			`UPDATE agents SET status='online', last_seen=NOW(), os=$1, arch=$2, version=$3 WHERE id=$4`,
 			hello.OS, hello.Arch, hello.Version, agentID,
-		)
+		); err != nil {
+			log.Printf("db update agent online %s: %v", agentID, err)
+		}
 	}
 
-	h.hub.Register(agentID, conn)
-	defer h.hub.Unregister(agentID)
+	ac := h.hub.Register(agentID, conn)
+	defer h.hub.Unregister(ac)
 
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	conn.SetPongHandler(func(string) error {
@@ -100,7 +103,9 @@ func (h *AgentHandler) handleAgentMessage(agentID string, msg AgentMessage) {
 	switch msg.Type {
 	case MsgTypeHeartbeat:
 		if h.db != nil {
-			h.db.Exec(`UPDATE agents SET last_seen=NOW() WHERE id=$1`, agentID)
+			if _, err := h.db.Exec(`UPDATE agents SET last_seen=NOW() WHERE id=$1`, agentID); err != nil {
+				log.Printf("db update heartbeat %s: %v", agentID, err)
+			}
 		}
 
 	case MsgTypeJobProgress:
@@ -108,21 +113,25 @@ func (h *AgentHandler) handleAgentMessage(agentID string, msg AgentMessage) {
 
 	case MsgTypeJobDone:
 		if h.db != nil {
-			h.db.Exec(`
+			if _, err := h.db.Exec(`
 				UPDATE backup_runs SET
 				  status='success', finished_at=NOW(),
 				  size_bytes=$1, file_count=$2, storage_path=$3
 				WHERE id=$4`,
-				msg.SizeBytes, msg.FileCount, msg.StoragePath, msg.RunID)
+				msg.SizeBytes, msg.FileCount, msg.StoragePath, msg.RunID); err != nil {
+				log.Printf("db update run success %s: %v", msg.RunID, err)
+			}
 		}
 		h.hub.BroadcastRunLog(msg.RunID, "completed: "+msg.StoragePath)
 
 	case MsgTypeJobFailed:
 		if h.db != nil {
-			h.db.Exec(`
+			if _, err := h.db.Exec(`
 				UPDATE backup_runs SET status='failed', finished_at=NOW(), error_message=$1
 				WHERE id=$2`,
-				msg.Error, msg.RunID)
+				msg.Error, msg.RunID); err != nil {
+				log.Printf("db update run failed %s: %v", msg.RunID, err)
+			}
 		}
 		h.hub.BroadcastRunLog(msg.RunID, "failed: "+msg.Error)
 		go h.notifyFailure(msg.RunID, msg.Error)
@@ -131,20 +140,29 @@ func (h *AgentHandler) handleAgentMessage(agentID string, msg AgentMessage) {
 
 func (h *AgentHandler) notifyFailure(runID, errMsg string) {
 	if h.failureNotifier == nil {
-		log.Printf("backup run %s failed (no notifier): %s", runID, errMsg)
+		log.Printf("backup run %s failed (no notifier configured): %s", runID, errMsg)
 		return
 	}
 	var jobName, agentName string
 	if h.db != nil {
-		h.db.QueryRow(`
+		err := h.db.QueryRow(`
 			SELECT bj.name, a.name
 			FROM backup_runs br
 			JOIN backup_jobs bj ON br.job_id=bj.id
 			JOIN agents a ON bj.agent_id=a.id
 			WHERE br.id=$1`, runID).Scan(&jobName, &agentName)
+		if err != nil && err != sql.ErrNoRows {
+			log.Printf("notifyFailure: lookup run %s: %v", runID, err)
+		}
+		if jobName == "" {
+			jobName = "<unknown>"
+		}
+		if agentName == "" {
+			agentName = "<unknown>"
+		}
 	}
 	if err := h.failureNotifier.SendFailureAlert(jobName, agentName, runID, errMsg); err != nil {
-		log.Printf("send failure email: %v", err)
+		log.Printf("send failure alert: %v", err)
 	}
 }
 
