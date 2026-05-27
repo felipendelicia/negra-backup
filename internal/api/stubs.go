@@ -3,9 +3,7 @@ package api
 
 import "net/http"
 
-func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request)                     {}
-func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request)                 {}
-func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request)                {}
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {}
 func (s *Server) handleListStorage(w http.ResponseWriter, r *http.Request)                {}
 func (s *Server) handleCreateStorage(w http.ResponseWriter, r *http.Request)              {}
 func (s *Server) handleUpdateStorage(w http.ResponseWriter, r *http.Request)              {}
