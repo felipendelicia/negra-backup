@@ -1,0 +1,174 @@
+// internal/ws/handler.go
+package ws
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/jmoiron/sqlx"
+	"golang.org/x/crypto/bcrypt"
+)
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin:     func(r *http.Request) bool { return true },
+}
+
+type FailureNotifier interface {
+	SendFailureAlert(jobName, agentName, runID, errMsg string) error
+}
+
+type AgentHandler struct {
+	hub             *Hub
+	db              *sqlx.DB
+	failureNotifier FailureNotifier
+}
+
+func NewAgentHandler(hub *Hub) *AgentHandler {
+	return &AgentHandler{hub: hub, db: hub.db}
+}
+
+func (h *AgentHandler) SetFailureNotifier(n FailureNotifier) {
+	h.failureNotifier = n
+}
+
+func (h *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("ws upgrade: %v", err)
+		return
+	}
+
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		conn.Close()
+		return
+	}
+
+	var hello AgentMessage
+	if err := json.Unmarshal(data, &hello); err != nil || hello.Type != MsgTypeHello {
+		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4001, "expected hello"))
+		conn.Close()
+		return
+	}
+
+	agentID, err := h.authenticateAPIKey(hello.APIKey)
+	if err != nil {
+		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4003, "unauthorized"))
+		conn.Close()
+		return
+	}
+
+	if h.db != nil {
+		h.db.Exec(
+			`UPDATE agents SET status='online', last_seen=NOW(), os=$1, arch=$2, version=$3 WHERE id=$4`,
+			hello.OS, hello.Arch, hello.Version, agentID,
+		)
+	}
+
+	h.hub.Register(agentID, conn)
+	defer h.hub.Unregister(agentID)
+
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+
+		var msg AgentMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue
+		}
+		h.handleAgentMessage(agentID, msg)
+	}
+}
+
+func (h *AgentHandler) handleAgentMessage(agentID string, msg AgentMessage) {
+	switch msg.Type {
+	case MsgTypeHeartbeat:
+		if h.db != nil {
+			h.db.Exec(`UPDATE agents SET last_seen=NOW() WHERE id=$1`, agentID)
+		}
+
+	case MsgTypeJobProgress:
+		h.hub.BroadcastRunLog(msg.RunID, fmt.Sprintf("%d%% %s", msg.Percent, msg.CurrentFile))
+
+	case MsgTypeJobDone:
+		if h.db != nil {
+			h.db.Exec(`
+				UPDATE backup_runs SET
+				  status='success', finished_at=NOW(),
+				  size_bytes=$1, file_count=$2, storage_path=$3
+				WHERE id=$4`,
+				msg.SizeBytes, msg.FileCount, msg.StoragePath, msg.RunID)
+		}
+		h.hub.BroadcastRunLog(msg.RunID, "completed: "+msg.StoragePath)
+
+	case MsgTypeJobFailed:
+		if h.db != nil {
+			h.db.Exec(`
+				UPDATE backup_runs SET status='failed', finished_at=NOW(), error_message=$1
+				WHERE id=$2`,
+				msg.Error, msg.RunID)
+		}
+		h.hub.BroadcastRunLog(msg.RunID, "failed: "+msg.Error)
+		go h.notifyFailure(msg.RunID, msg.Error)
+	}
+}
+
+func (h *AgentHandler) notifyFailure(runID, errMsg string) {
+	if h.failureNotifier == nil {
+		log.Printf("backup run %s failed (no notifier): %s", runID, errMsg)
+		return
+	}
+	var jobName, agentName string
+	if h.db != nil {
+		h.db.QueryRow(`
+			SELECT bj.name, a.name
+			FROM backup_runs br
+			JOIN backup_jobs bj ON br.job_id=bj.id
+			JOIN agents a ON bj.agent_id=a.id
+			WHERE br.id=$1`, runID).Scan(&jobName, &agentName)
+	}
+	if err := h.failureNotifier.SendFailureAlert(jobName, agentName, runID, errMsg); err != nil {
+		log.Printf("send failure email: %v", err)
+	}
+}
+
+func (h *AgentHandler) authenticateAPIKey(apiKey string) (string, error) {
+	if h.db == nil {
+		return "test-agent-id", nil
+	}
+	rows, err := h.db.Query(`SELECT id, api_key FROM agents`)
+	if err != nil {
+		return "", fmt.Errorf("db query: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id, hash string
+		if err := rows.Scan(&id, &hash); err != nil {
+			continue
+		}
+		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(apiKey)) == nil {
+			return id, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("rows error: %w", err)
+	}
+	return "", fmt.Errorf("invalid api key")
+}
