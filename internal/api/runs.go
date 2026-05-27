@@ -3,6 +3,7 @@ package api
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/felipendelicia/nat-backup/internal/models"
@@ -32,7 +33,8 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 
 	var runs []models.BackupRun
 	if err := s.db.Select(&runs, query, args...); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("handleListRuns: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	respond(w, http.StatusOK, runs)

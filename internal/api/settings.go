@@ -3,6 +3,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/felipendelicia/nat-backup/internal/models"
@@ -27,15 +28,29 @@ func (s *Server) handleUpdateNotificationSettings(w http.ResponseWriter, r *http
 		respondError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	// Try insert; if one already exists, delete and re-insert
-	_, err := s.db.Exec(`INSERT INTO notification_settings (type, config) VALUES ($1, $2)`, body.Type, body.Config)
+
+	tx, err := s.db.Begin()
 	if err != nil {
-		s.db.Exec(`DELETE FROM notification_settings`)
-		_, err = s.db.Exec(`INSERT INTO notification_settings (type, config) VALUES ($1, $2)`, body.Type, body.Config)
-		if err != nil {
-			respondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+		log.Printf("handleUpdateNotificationSettings begin tx: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM notification_settings`); err != nil {
+		log.Printf("handleUpdateNotificationSettings delete: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if _, err := tx.Exec(`INSERT INTO notification_settings (type, config) VALUES ($1, $2)`, body.Type, body.Config); err != nil {
+		log.Printf("handleUpdateNotificationSettings insert: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("handleUpdateNotificationSettings commit: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

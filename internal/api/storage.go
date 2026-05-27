@@ -3,6 +3,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/felipendelicia/nat-backup/internal/crypto"
@@ -21,7 +22,8 @@ func (s *Server) handleListStorage(w http.ResponseWriter, r *http.Request) {
 	var dests []models.StorageDestination
 	// Config column intentionally excluded from list (contains secrets)
 	if err := s.db.Select(&dests, `SELECT id, name, type, created_at FROM storage_destinations ORDER BY created_at DESC`); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("handleListStorage: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	respond(w, http.StatusOK, dests)
@@ -48,7 +50,8 @@ func (s *Server) handleCreateStorage(w http.ResponseWriter, r *http.Request) {
 		req.Name, req.Type, encConfig,
 	).StructScan(&dest)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("handleCreateStorage: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	respond(w, http.StatusCreated, dest)
@@ -75,7 +78,8 @@ func (s *Server) handleUpdateStorage(w http.ResponseWriter, r *http.Request) {
 		req.Name, req.Type, encConfig, id,
 	)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("handleUpdateStorage: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	rows, _ := result.RowsAffected()
@@ -94,7 +98,8 @@ func (s *Server) handleDeleteStorage(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.db.Exec(`DELETE FROM storage_destinations WHERE id=$1`, id)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("handleDeleteStorage: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	rows, _ := result.RowsAffected()

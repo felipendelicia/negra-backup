@@ -4,6 +4,7 @@ package api
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -40,22 +41,25 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	destDir := filepath.Join("data", "uploads", runID.String())
+	destDir := filepath.Join(os.TempDir(), "nat-backup-uploads", runID.String())
 	if err := os.MkdirAll(destDir, 0700); err != nil {
-		respondError(w, http.StatusInternalServerError, "create dir: "+err.Error())
+		log.Printf("handleUpload: mkdir: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	destPath := filepath.Join(destDir, header.Filename)
+	destPath := filepath.Join(destDir, filepath.Base(header.Filename))
 	dst, err := os.Create(destPath)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "create file: "+err.Error())
+		log.Printf("handleUpload: create file: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	defer dst.Close()
 
 	size, err := io.Copy(dst, file)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "write file: "+err.Error())
+		log.Printf("handleUpload: write file: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	_, err = s.db.Exec(
@@ -63,7 +67,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		size, fmt.Sprintf("local://%s", destPath), runID,
 	)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("handleUpload: db update: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	respond(w, http.StatusOK, map[string]any{"bytes_received": size})

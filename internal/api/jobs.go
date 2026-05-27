@@ -3,6 +3,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -32,7 +33,8 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		SELECT id, agent_id, name, enabled, type, source, storage_destination_id,
 		       schedule_cron, retention_days, compression, encrypt, created_at, updated_at
 		FROM backup_jobs ORDER BY created_at DESC`); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("handleListJobs: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	respond(w, http.StatusOK, jobs)
@@ -75,7 +77,8 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		req.Compression, req.Encrypt, encPassphrase,
 	).StructScan(&job)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("handleCreateJob: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	respond(w, http.StatusCreated, job)
@@ -112,7 +115,8 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 		req.Compression, req.Encrypt, encPassphrase, time.Now(), id,
 	)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("handleUpdateJob: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	rows, _ := result.RowsAffected()
@@ -131,7 +135,8 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.db.Exec(`DELETE FROM backup_jobs WHERE id=$1`, id)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("handleDeleteJob: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	rows, _ := result.RowsAffected()
@@ -158,7 +163,8 @@ func (s *Server) handleTriggerJob(w http.ResponseWriter, r *http.Request) {
 		`INSERT INTO backup_runs (job_id, status) VALUES ($1, 'running') RETURNING id, job_id, started_at, status`,
 		id,
 	).StructScan(&run); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("handleTriggerJob: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	if s.hub != nil {

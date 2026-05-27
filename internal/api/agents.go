@@ -4,6 +4,7 @@ package api
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"log"
 	"net/http"
 
 	"github.com/felipendelicia/nat-backup/internal/models"
@@ -15,7 +16,8 @@ import (
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	var agents []models.Agent
 	if err := s.db.Select(&agents, `SELECT id, name, os, arch, version, last_seen, status, created_at FROM agents ORDER BY created_at DESC`); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("handleListAgents: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	respond(w, http.StatusOK, agents)
@@ -29,7 +31,8 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.db.Exec(`DELETE FROM agents WHERE id = $1`, id)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("handleDeleteAgent: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	rows, _ := result.RowsAffected()
