@@ -3,7 +3,6 @@ package api
 
 import "net/http"
 
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request)                      {}
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request)                     {}
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request)                 {}
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request)                {}
@@ -20,5 +19,3 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request)         
 func (s *Server) handleRunLogs(w http.ResponseWriter, r *http.Request)                    {}
 func (s *Server) handleGetNotificationSettings(w http.ResponseWriter, r *http.Request)    {}
 func (s *Server) handleUpdateNotificationSettings(w http.ResponseWriter, r *http.Request) {}
-func (s *Server) jwtAuthMiddleware(next http.Handler) http.Handler                        { return next }
-func (s *Server) agentAuthMiddleware(next http.Handler) http.Handler                      { return next }
