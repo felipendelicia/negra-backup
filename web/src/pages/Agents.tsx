@@ -69,7 +69,7 @@ export default function Agents() {
   const [newName, setNewName] = useState('')
   const [nameError, setNameError] = useState('')
 
-  const serverUrl = window.location.origin
+  const [serverUrl, setServerUrl] = useState(window.location.origin)
 
   const { data: latestVersion } = useQuery({
     queryKey: ['gh-latest-version'],
@@ -313,6 +313,22 @@ export default function Agents() {
               </DialogHeader>
 
               <div className="px-6 py-5 space-y-5 overflow-y-auto max-h-[70vh]">
+
+                {/* Server URL (editable) */}
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Server URL
+                  </Label>
+                  <Input
+                    value={serverUrl}
+                    onChange={e => setServerUrl(e.target.value)}
+                    className="font-mono text-xs border-2 focus-visible:ring-0 focus-visible:border-foreground"
+                    placeholder="http://192.168.1.100:8080"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Change this to the IP or domain where agents can reach this server.
+                  </p>
+                </div>
 
                 {/* API Key */}
                 <div className="space-y-1.5">
