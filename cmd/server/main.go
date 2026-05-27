@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -56,6 +57,9 @@ func main() {
 	)
 
 	srv, hub, agentHandler := api.NewServerWithStatic(pool, cfg)
+
+	// Tee log output to the browser console hub
+	log.SetOutput(io.MultiWriter(os.Stderr, srv.GetConsoleHub()))
 
 	// Wire email notifier if notification settings exist in DB.
 	var emailSender *notify.EmailSender

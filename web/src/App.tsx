@@ -7,6 +7,7 @@ import Agents from 'src/pages/Agents'
 import Jobs from 'src/pages/Jobs'
 import Runs from 'src/pages/Runs'
 import Storage from 'src/pages/Storage'
+import Console from 'src/pages/Console'
 import Settings from 'src/pages/Settings'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -34,6 +35,7 @@ export default function App() {
           <Route path="jobs" element={<Jobs />} />
           <Route path="runs" element={<Runs />} />
           <Route path="storage" element={<Storage />} />
+          <Route path="console" element={<Console />} />
           <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>

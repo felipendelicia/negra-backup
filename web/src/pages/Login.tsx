@@ -5,7 +5,6 @@ import { api } from 'src/lib/api'
 import { Button } from 'src/components/ui/button'
 import { Input } from 'src/components/ui/input'
 import { Label } from 'src/components/ui/label'
-import { Card, CardContent, CardHeader, CardTitle } from 'src/components/ui/card'
 
 export default function Login() {
   const [username, setUsername] = useState('admin')
@@ -31,28 +30,74 @@ export default function Login() {
   }
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-muted">
-      <Card className="w-96">
-        <CardHeader>
-          <CardTitle className="text-2xl text-center">Negra Backup</CardTitle>
-        </CardHeader>
-        <CardContent>
+    <div className="relative min-h-screen flex items-center justify-center bg-background overflow-hidden">
+      {/* Dot-grid background */}
+      <div className="absolute inset-0 dot-grid" />
+
+      {/* Gradient vignette */}
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_80%_80%_at_50%_50%,transparent_40%,var(--background)_100%)]" />
+
+      <div className="relative z-10 w-full max-w-sm px-4">
+        {/* Brand */}
+        <div className="mb-10 text-center select-none">
+          <div className="inline-flex items-center justify-center w-14 h-14 bg-foreground rounded-lg mb-5">
+            <span className="font-display font-black text-background text-xl tracking-tight">NB</span>
+          </div>
+          <h1 className="font-display font-black text-4xl uppercase tracking-tight text-foreground leading-none">
+            Negra Backup
+          </h1>
+          <p className="text-xs text-muted-foreground tracking-[0.2em] uppercase mt-2">
+            Self-hosted backup manager
+          </p>
+        </div>
+
+        {/* Card */}
+        <div className="bg-card border-2 border-border rounded-lg p-6 shadow-sm">
           <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="username">Username</Label>
-              <Input id="username" value={username} onChange={e => setUsername(e.target.value)} autoComplete="username" />
+            <div className="space-y-1.5">
+              <Label htmlFor="username" className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Username
+              </Label>
+              <Input
+                id="username"
+                value={username}
+                onChange={e => setUsername(e.target.value)}
+                autoComplete="username"
+                autoFocus
+                className="border-2 focus-visible:ring-0 focus-visible:border-foreground transition-colors"
+              />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
-              <Input id="password" type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" />
+
+            <div className="space-y-1.5">
+              <Label htmlFor="password" className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Password
+              </Label>
+              <Input
+                id="password"
+                type="password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                autoComplete="current-password"
+                className="border-2 focus-visible:ring-0 focus-visible:border-foreground transition-colors"
+              />
             </div>
-            {error && <p className="text-sm text-destructive">{error}</p>}
-            <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? 'Signing in...' : 'Sign in'}
+
+            {error && (
+              <p className="text-xs text-destructive bg-destructive/8 border border-destructive/20 rounded px-3 py-2">
+                {error}
+              </p>
+            )}
+
+            <Button
+              type="submit"
+              className="w-full font-semibold uppercase tracking-wider text-xs h-10"
+              disabled={loading}
+            >
+              {loading ? 'Signing in…' : 'Sign in'}
             </Button>
           </form>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
     </div>
   )
 }

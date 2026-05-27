@@ -69,8 +69,16 @@ PostgreSQL with migrations in `migrations/`. Migrations run automatically at ser
 
 ### Web UI
 
-React + TypeScript (Vite, shadcn/ui, React Router v6). Pages: Dashboard, Agents, Jobs, Runs, Storage, Settings. Auth: JWT stored in `localStorage`, injected as `Authorization: Bearer` header by `src/lib/api.ts`. The built `web/dist` is embedded into the server binary via `internal/api/static/` and served as a SPA with fallback to `index.html`.
+React + TypeScript (Vite, shadcn/ui, React Router v6, next-themes). Pages: Dashboard, Agents, Jobs, Runs, Storage, Console, Settings. Auth: JWT stored in `localStorage`, injected as `Authorization: Bearer` header by `src/lib/api.ts`. Theme (light/dark/system) persisted via `next-themes` with `.dark` class on `<html>`. The built `web/dist` is embedded into the server binary via `internal/api/static/` and served as a SPA with fallback to `index.html`.
 
 ### Real-time run logs
 
 `GET /api/runs/{id}/logs/ws` upgrades to WebSocket. The hub maintains a pub/sub map (`logSubs`) keyed by `run_id`; `AgentHandler` calls `hub.BroadcastRunLog` as progress messages arrive. Completed runs replay stored logs from DB.
+
+### Server console stream
+
+`GET /ws/console?token=<jwt>` streams server `log` output in real time to the Console page. `internal/api.ConsoleHub` implements `io.Writer`; in `cmd/server/main.go` it's wired via `io.MultiWriter(os.Stderr, srv.GetConsoleHub())`. Auth uses a JWT query param (browsers cannot set headers on WebSocket connections).
+
+### Database schema
+
+Full schema documented in `docs/schema.md`. **Keep that file updated whenever migrations are added or columns change.**

@@ -16,16 +16,20 @@ import (
 )
 
 type Server struct {
-	router    chi.Router
-	db        *sqlx.DB
-	cfg       config.Config
-	hub       *ws.Hub
-	wsHandler *ws.AgentHandler
-	sched     interface {
+	router      chi.Router
+	db          *sqlx.DB
+	cfg         config.Config
+	hub         *ws.Hub
+	wsHandler   *ws.AgentHandler
+	consoleHub  *ConsoleHub
+	sched       interface {
 		AddJob(job models.BackupJob) error
 		RemoveJob(jobID string)
 	}
 }
+
+// ConsoleHub returns the server's log broadcast hub so callers can wire log.SetOutput.
+func (s *Server) GetConsoleHub() *ConsoleHub { return s.consoleHub }
 
 func (s *Server) SetScheduler(sched interface {
 	AddJob(job models.BackupJob) error
@@ -41,10 +45,11 @@ func NewServer(db *sqlx.DB, cfg config.Config) (*Server, *ws.Hub, *ws.AgentHandl
 
 	agentHandler := ws.NewAgentHandler(hub)
 	s := &Server{
-		db:        db,
-		cfg:       cfg,
-		hub:       hub,
-		wsHandler: agentHandler,
+		db:         db,
+		cfg:        cfg,
+		hub:        hub,
+		wsHandler:  agentHandler,
+		consoleHub: NewConsoleHub(),
 	}
 	s.router = s.buildRouter()
 	return s, hub, agentHandler
@@ -60,10 +65,11 @@ func NewServerWithStatic(db *sqlx.DB, cfg config.Config) (*Server, *ws.Hub, *ws.
 	go hub.Run()
 	agentHandler := ws.NewAgentHandler(hub)
 	s := &Server{
-		db:        db,
-		cfg:       cfg,
-		hub:       hub,
-		wsHandler: agentHandler,
+		db:         db,
+		cfg:        cfg,
+		hub:        hub,
+		wsHandler:  agentHandler,
+		consoleHub: NewConsoleHub(),
 	}
 	s.router = s.buildRouterWithStatic()
 	return s, hub, agentHandler
@@ -115,6 +121,9 @@ func (s *Server) buildRouter() chi.Router {
 
 	// WebSocket for agents (auth via hello message)
 	r.Get("/ws/agent", s.wsHandler.ServeHTTP)
+
+	// WebSocket for server console logs (auth via ?token= query param)
+	r.Get("/ws/console", s.handleConsoleWS)
 
 	r.Post("/api/auth/login", s.handleLogin)
 
