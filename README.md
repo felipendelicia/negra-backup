@@ -1,126 +1,126 @@
 # nat-backup
 
-Self-hosted backup manager. A central server orchestrates agents running on your machines — agents execute backups and push archives to configured storage destinations.
+Gestor de backups self-hosted. Un servidor central orquesta agentes que corren en tus máquinas — los agentes ejecutan los backups y suben los archivos a los destinos de almacenamiento configurados.
 
-## Features
+## Características
 
-- **File backups** — tar + compress (gzip or zstd) + optional AES-256-GCM encryption
-- **Database backups** — PostgreSQL, MySQL, SQLite, MongoDB
-- **Storage backends** — local filesystem, S3-compatible, SFTP
-- **Cron scheduling** — standard cron expressions per job
-- **Retention** — automatic cleanup of old runs
-- **Email notifications** — on backup failure
-- **Web UI** — dashboard, agents, jobs, run history with live logs
-- **Real-time logs** — WebSocket stream while a backup runs
+- **Backups de archivos** — tar + compresión (gzip o zstd) + cifrado AES-256-GCM opcional
+- **Backups de bases de datos** — PostgreSQL, MySQL, SQLite, MongoDB
+- **Backends de almacenamiento** — sistema de archivos local, S3-compatible, SFTP
+- **Programación cron** — expresiones cron estándar por trabajo
+- **Retención** — limpieza automática de ejecuciones antiguas
+- **Notificaciones por email** — ante fallas de backup
+- **UI web** — dashboard, agentes, trabajos, historial de ejecuciones con logs en vivo
+- **Logs en tiempo real** — stream por WebSocket mientras corre un backup
 
-## How it works
+## Cómo funciona
 
 ```
 ┌─────────────────┐        WebSocket         ┌─────────────────┐
-│   nat-backup    │ ◄──── agent connects ──── │  nat-backup     │
-│   server        │ ──── dispatch job ──────► │  agent          │
-│  (PostgreSQL)   │ ◄──── progress/done ───── │  (on host)      │
+│   nat-backup    │ ◄──── agente conecta ──── │  nat-backup     │
+│   servidor      │ ──── despacha trabajo ──► │  agente         │
+│  (PostgreSQL)   │ ◄──── progreso/listo ───── │  (en el host)   │
 └─────────────────┘                           └─────────────────┘
         │                                             │
-   Web UI (React)                            backup → storage
+   UI web (React)                          backup → almacenamiento
 ```
 
-Agents connect outbound to the server — no inbound firewall rules needed on agent hosts.
+Los agentes se conectan de forma saliente al servidor — no se necesitan reglas de firewall entrantes en los hosts de los agentes.
 
-## Quick start
+## Inicio rápido
 
-### 1. Start the server
+### 1. Iniciar el servidor
 
 ```bash
-# Start Postgres
+# Iniciar Postgres
 docker compose up -d postgres
 
-# Configure
+# Configurar
 cp .env.example .env
-# Edit .env: set JWT_SECRET, ENCRYPTION_KEY (64-char hex), ADMIN_PASSWORD
+# Editar .env: definir JWT_SECRET, ENCRYPTION_KEY (hex de 64 chars), ADMIN_PASSWORD
 
-# Build and run
+# Compilar y ejecutar
 make build-full
 export $(cat .env | xargs)
 ./bin/nat-backup-server
 ```
 
-Open `http://localhost:8080` — login with `admin` / your `ADMIN_PASSWORD`.
+Abrir `http://localhost:8080` — ingresar con `admin` / tu `ADMIN_PASSWORD`.
 
-### 2. Add an agent
+### 2. Agregar un agente
 
-In the Web UI → **Agents** → create agent → copy the API key.
+En la UI web → **Agentes** → crear agente → copiar la API key.
 
-On the machine to back up:
+En la máquina a respaldar:
 
 ```bash
-# Download the agent binary (or build it: make build-agent)
+# Descargar el binario del agente (o compilarlo: make build-agent)
 cat > agent.yaml <<EOF
-server_url: http://your-server:8080
-api_key: <paste-api-key>
+server_url: http://tu-servidor:8080
+api_key: <pegar-api-key>
 EOF
 
 ./nat-backup-agent agent.yaml
 
-# Install as system service (Linux/Windows)
+# Instalar como servicio del sistema (Linux/Windows)
 ./nat-backup-agent install
 ```
 
-### 3. Create a job
+### 3. Crear un trabajo
 
-Web UI → **Jobs** → configure source (files or database), storage destination, cron schedule.
+UI web → **Trabajos** → configurar fuente (archivos o base de datos), destino de almacenamiento, horario cron.
 
-## Configuration
+## Configuración
 
-### Server (environment variables)
+### Servidor (variables de entorno)
 
-| Variable | Description |
+| Variable | Descripción |
 |----------|-------------|
-| `DATABASE_URL` | PostgreSQL connection string |
-| `JWT_SECRET` | Secret for signing JWT tokens (min 32 chars) |
-| `ENCRYPTION_KEY` | 64-char hex key for encrypting storage configs and passphrases at rest |
-| `ADMIN_PASSWORD` | Initial admin password |
-| `PORT` | HTTP port (default `8080`) |
-| `TLS_ENABLED` | `true` to enable TLS |
-| `TLS_CERT_FILE` | Path to TLS certificate |
-| `TLS_KEY_FILE` | Path to TLS key |
+| `DATABASE_URL` | Cadena de conexión a PostgreSQL |
+| `JWT_SECRET` | Clave para firmar tokens JWT (mín. 32 chars) |
+| `ENCRYPTION_KEY` | Clave hex de 64 chars para cifrar configs de almacenamiento y passphrases en reposo |
+| `ADMIN_PASSWORD` | Contraseña inicial del administrador |
+| `PORT` | Puerto HTTP (por defecto `8080`) |
+| `TLS_ENABLED` | `true` para habilitar TLS |
+| `TLS_CERT_FILE` | Ruta al certificado TLS |
+| `TLS_KEY_FILE` | Ruta a la clave TLS |
 
-### Agent (`agent.yaml`)
+### Agente (`agent.yaml`)
 
 ```yaml
-server_url: https://your-server.example.com
-api_key: your-api-key
+server_url: https://tu-servidor.ejemplo.com
+api_key: tu-api-key
 ```
 
-## Building
+## Compilación
 
 ```bash
-make build              # server + agent
-make build-full         # UI + server + agent
-make build-agent-windows  # Windows agent cross-compile
+make build              # servidor + agente
+make build-full         # UI + servidor + agente
+make build-agent-windows  # compilación cruzada del agente para Windows
 ```
 
-## Development
+## Desarrollo
 
 ```bash
-make dev-up             # start Postgres via Docker
-make test               # all tests
-make test-short         # skip tests requiring external services
+make dev-up             # iniciar Postgres via Docker
+make test               # todos los tests
+make test-short         # omitir tests que requieren servicios externos
 ```
 
-## Storage destinations
+## Destinos de almacenamiento
 
-| Type | Config fields |
-|------|--------------|
-| `local` | `path` — directory on the **agent's** host |
+| Tipo | Campos de configuración |
+|------|------------------------|
+| `local` | `path` — directorio en el host **del agente** |
 | `s3` | `endpoint`, `bucket`, `region`, `access_key`, `secret_key` |
-| `sftp` | `host`, `port`, `user`, `password` or `private_key`, `path` |
+| `sftp` | `host`, `port`, `user`, `password` o `private_key`, `path` |
 
-When using `local` storage with the server as the destination, the agent uploads via `POST /api/upload/{run_id}`.
+Al usar almacenamiento `local` con el servidor como destino, el agente sube via `POST /api/upload/{run_id}`.
 
-## Security
+## Seguridad
 
-- Storage configs and backup passphrases are AES-256-GCM encrypted at rest using `ENCRYPTION_KEY`.
-- Decrypted values are only held in-process and transmitted over the existing authenticated WebSocket connection.
-- Agents authenticate with per-agent API keys.
-- Web UI uses short-lived JWTs.
+- Las configs de almacenamiento y passphrases de backup se cifran en reposo con AES-256-GCM usando `ENCRYPTION_KEY`.
+- Los valores descifrados solo se mantienen en memoria y se transmiten por la conexión WebSocket autenticada existente.
+- Los agentes se autentican con API keys individuales.
+- La UI web usa JWTs de corta duración.
