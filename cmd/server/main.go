@@ -56,6 +56,11 @@ func main() {
 		string(hash),
 	)
 
+	// Mark all agents offline at startup — hub is empty, DB must match.
+	if _, err := pool.Exec(`UPDATE agents SET status='offline'`); err != nil {
+		log.Printf("reset agent status: %v", err)
+	}
+
 	srv, hub, agentHandler := api.NewServerWithStatic(pool, cfg)
 
 	// Tee log output to the browser console hub

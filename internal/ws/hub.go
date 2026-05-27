@@ -42,8 +42,14 @@ func NewHub(db *sqlx.DB) *Hub {
 }
 
 func (h *Hub) Run() {
+	reconcile := time.NewTicker(60 * time.Second)
+	defer reconcile.Stop()
+
 	for {
 		select {
+		case <-reconcile.C:
+			h.reconcileOffline()
+
 		case ac := <-h.register:
 			h.mu.Lock()
 			h.agents[ac.agentID] = ac
@@ -82,6 +88,39 @@ func (h *Hub) Register(agentID string, conn *websocket.Conn) *AgentConn {
 // preventing a stale unregister from closing a newer connection for the same agent.
 func (h *Hub) Unregister(ac *AgentConn) {
 	h.unregister <- ac
+}
+
+// reconcileOffline marks as offline any agent the DB thinks is online
+// but that is not present in the hub's active connections.
+func (h *Hub) reconcileOffline() {
+	if h.db == nil {
+		return
+	}
+	rows, err := h.db.Query(`SELECT id FROM agents WHERE status='online'`)
+	if err != nil {
+		log.Printf("reconcileOffline: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	h.mu.RLock()
+	connected := make(map[string]bool, len(h.agents))
+	for id := range h.agents {
+		connected[id] = true
+	}
+	h.mu.RUnlock()
+
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		if !connected[id] {
+			if _, err := h.db.Exec(`UPDATE agents SET status='offline' WHERE id=$1`, id); err != nil {
+				log.Printf("reconcileOffline: mark offline %s: %v", id, err)
+			}
+		}
+	}
 }
 
 func (h *Hub) IsConnected(agentID string) bool {
