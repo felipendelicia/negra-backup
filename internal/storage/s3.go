@@ -50,7 +50,7 @@ func (b *S3Backend) Upload(filename string, r io.Reader, size int64) error {
 		Bucket:        aws.String(b.cfg.Bucket),
 		Key:           aws.String(key),
 		Body:          r,
-		ContentLength: size,
+		ContentLength: aws.Int64(size),
 	})
 	if err != nil {
 		return fmt.Errorf("s3 put object: %w", err)
