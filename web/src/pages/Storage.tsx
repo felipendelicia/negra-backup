@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { api } from 'src/lib/api'
 import { ConfirmDialog } from 'src/components/ConfirmDialog'
 import { Button } from 'src/components/ui/button'
@@ -87,19 +88,33 @@ export default function Storage() {
 
   const createMut = useMutation({
     mutationFn: (data: CreateStorageRequest) => api.createStorage(data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['storage'] }); closeDialog() },
+    onSuccess: (dest) => {
+      qc.invalidateQueries({ queryKey: ['storage'] })
+      closeDialog()
+      toast.success(`"${dest.name}" created`)
+    },
     onError: (e) => setFormError(e.message),
   })
 
   const updateMut = useMutation({
     mutationFn: ({ id, data }: { id: string; data: CreateStorageRequest }) => api.updateStorage(id, data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['storage'] }); closeDialog() },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['storage'] })
+      closeDialog()
+      toast.success('Storage destination updated')
+    },
     onError: (e) => setFormError(e.message),
   })
 
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.deleteStorage(id),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['storage'] }); setDeleteTarget(null) },
+    onSuccess: (_, id) => {
+      const name = storage.find(s => s.id === id)?.name ?? 'Destination'
+      qc.invalidateQueries({ queryKey: ['storage'] })
+      setDeleteTarget(null)
+      toast.success(`"${name}" deleted`)
+    },
+    onError: (e: Error) => toast.error(`Failed to delete: ${e.message}`),
   })
 
   function openCreate() {

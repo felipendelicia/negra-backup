@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { api } from 'src/lib/api'
 import { StatusBadge } from 'src/components/StatusBadge'
 import { ConfirmDialog } from 'src/components/ConfirmDialog'
@@ -24,27 +25,40 @@ export default function Agents() {
 
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.deleteAgent(id),
-    onSuccess: () => {
+    onSuccess: (_, id) => {
+      const name = agents.find(a => a.id === id)?.name ?? 'Agent'
       qc.invalidateQueries({ queryKey: ['agents'] })
       setDeleteTarget(null)
+      toast.success(`${name} removed`)
     },
+    onError: (err: Error) => toast.error(`Failed to remove agent: ${err.message}`),
   })
 
   const updateMut = useMutation({
     mutationFn: (id: string) => api.updateAgent(id),
-    onMutate: (id) => setUpdatingId(id),
+    onMutate: (id) => {
+      setUpdatingId(id)
+      const name = agents.find(a => a.id === id)?.name ?? 'Agent'
+      toast.loading(`Sending update signal to ${name}…`, { id: 'agent-update' })
+    },
     onSuccess: (_, id) => {
       setUpdatingId(null)
       setUpdatedIds(prev => new Set(prev).add(id))
-      // After 4 s the agent reconnects — refetch
+      const name = agents.find(a => a.id === id)?.name ?? 'Agent'
+      toast.success(`Update signal sent to ${name}. Agent will reconnect shortly.`, {
+        id: 'agent-update',
+        duration: 6_000,
+      })
       setTimeout(() => {
         qc.invalidateQueries({ queryKey: ['agents'] })
         setUpdatedIds(prev => { const s = new Set(prev); s.delete(id); return s })
-      }, 4_000)
+      }, 5_000)
     },
-    onError: (_, id) => {
+    onError: (err: Error, id) => {
       setUpdatingId(null)
       setUpdatedIds(prev => { const s = new Set(prev); s.delete(id); return s })
+      const name = agents.find(a => a.id === id)?.name ?? 'Agent'
+      toast.error(`Could not update ${name}: ${err.message}`, { id: 'agent-update' })
     },
   })
 

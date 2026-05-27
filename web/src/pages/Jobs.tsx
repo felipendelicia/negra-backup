@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { api } from 'src/lib/api'
 import { StatusBadge } from 'src/components/StatusBadge'
 import { ConfirmDialog } from 'src/components/ConfirmDialog'
@@ -107,24 +108,43 @@ export default function Jobs() {
 
   const createMut = useMutation({
     mutationFn: (data: CreateJobRequest) => api.createJob(data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['jobs'] }); closeDialog() },
+    onSuccess: (job) => {
+      qc.invalidateQueries({ queryKey: ['jobs'] })
+      closeDialog()
+      toast.success(`Job "${job.name}" created`)
+    },
     onError: (e) => setFormError(e.message),
   })
 
   const updateMut = useMutation({
     mutationFn: ({ id, data }: { id: string; data: CreateJobRequest }) => api.updateJob(id, data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['jobs'] }); closeDialog() },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['jobs'] })
+      closeDialog()
+      toast.success('Job updated')
+    },
     onError: (e) => setFormError(e.message),
   })
 
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.deleteJob(id),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['jobs'] }); setDeleteTarget(null) },
+    onSuccess: (_, id) => {
+      qc.invalidateQueries({ queryKey: ['jobs'] })
+      setDeleteTarget(null)
+      const name = jobs.find(j => j.id === id)?.name ?? 'Job'
+      toast.success(`"${name}" deleted`)
+    },
+    onError: (e: Error) => toast.error(`Failed to delete: ${e.message}`),
   })
 
   const triggerMut = useMutation({
     mutationFn: (id: string) => api.triggerJob(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['runs'] }),
+    onSuccess: (_, id) => {
+      qc.invalidateQueries({ queryKey: ['runs'] })
+      const name = jobs.find(j => j.id === id)?.name ?? 'Job'
+      toast.success(`"${name}" dispatched — check Runs for progress`)
+    },
+    onError: (e: Error) => toast.error(`Failed to trigger: ${e.message}`),
   })
 
   function openCreate() {
