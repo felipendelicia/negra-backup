@@ -116,7 +116,7 @@ export default function Console() {
       {/* Header */}
       <div className="flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
-          <h2 className="font-display font-bold text-2xl tracking-tight">Console</h2>
+          <h2 className="font-sans font-bold text-2xl tracking-tight">Console</h2>
           <span className={cn(
             'flex items-center gap-1.5 text-xs font-medium',
             connected ? 'text-emerald-500' : 'text-muted-foreground'

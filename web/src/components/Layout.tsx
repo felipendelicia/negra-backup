@@ -39,14 +39,8 @@ export default function Layout() {
       <aside className="w-52 border-r bg-sidebar flex flex-col shrink-0">
 
         {/* Logo */}
-        <div className="px-4 py-4 border-b flex items-center gap-2.5">
-          <div className="w-8 h-8 bg-foreground rounded flex items-center justify-center shrink-0">
-            <span className="font-display font-black text-background text-xs tracking-tight">NB</span>
-          </div>
-          <div className="min-w-0">
-            <p className="font-display font-bold text-sm uppercase tracking-widest leading-none text-foreground">Negra</p>
-            <p className="text-[10px] text-muted-foreground tracking-wider uppercase leading-none mt-0.5">Backup</p>
-          </div>
+        <div className="px-4 py-4 border-b">
+          <p className="font-sans font-bold text-sm uppercase tracking-widest leading-none text-foreground">Negra Backup</p>
         </div>
 
         {/* Nav */}

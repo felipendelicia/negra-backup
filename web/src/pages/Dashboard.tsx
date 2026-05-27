@@ -68,7 +68,7 @@ export default function Dashboard() {
   return (
     <div className="space-y-6">
       <div className="flex items-baseline justify-between">
-        <h2 className="font-display font-bold text-2xl tracking-tight">Dashboard</h2>
+        <h2 className="font-sans font-bold text-2xl tracking-tight">Dashboard</h2>
         {runsError && <p className="text-xs text-destructive">Failed to load run data.</p>}
       </div>
 
@@ -89,7 +89,7 @@ export default function Dashboard() {
               </span>
               <stat.icon className={cn('h-3.5 w-3.5 text-muted-foreground', stat.color && 'opacity-70')} />
             </div>
-            <div className={cn('font-display font-black text-4xl leading-none tabular-nums', stat.color)}>
+            <div className={cn('font-sans font-black text-4xl leading-none tabular-nums', stat.color)}>
               {stat.value}
             </div>
             <div className="text-xs text-muted-foreground">{stat.sub}</div>

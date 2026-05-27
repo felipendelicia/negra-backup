@@ -90,7 +90,7 @@ export default function Runs() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="font-display font-bold text-2xl tracking-tight">Run History</h2>
+        <h2 className="font-sans font-bold text-2xl tracking-tight">Run History</h2>
 
         {/* Filter pills */}
         <div className="flex gap-1">

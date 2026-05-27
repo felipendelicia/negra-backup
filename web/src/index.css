@@ -2,12 +2,10 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
-@import "@fontsource-variable/syne";
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-    --font-display: 'Syne Variable', sans-serif;
     --font-heading: var(--font-sans);
     --font-sans: 'Geist Variable', sans-serif;
     --color-sidebar-ring: var(--sidebar-ring);
@@ -206,7 +204,3 @@ a, button, [role="button"] {
   background-size: 20px 20px;
 }
 
-/* ─── Font-display utility ───────────────────────────────────────────────── */
-.font-display {
-  font-family: var(--font-display);
-}

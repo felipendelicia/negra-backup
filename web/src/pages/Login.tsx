@@ -40,10 +40,7 @@ export default function Login() {
       <div className="relative z-10 w-full max-w-sm px-4">
         {/* Brand */}
         <div className="mb-10 text-center select-none">
-          <div className="inline-flex items-center justify-center w-14 h-14 bg-foreground rounded-lg mb-5">
-            <span className="font-display font-black text-background text-xl tracking-tight">NB</span>
-          </div>
-          <h1 className="font-display font-black text-4xl uppercase tracking-tight text-foreground leading-none">
+          <h1 className="font-sans font-black text-4xl uppercase tracking-tight text-foreground leading-none">
             Negra Backup
           </h1>
           <p className="text-xs text-muted-foreground tracking-[0.2em] uppercase mt-2">
