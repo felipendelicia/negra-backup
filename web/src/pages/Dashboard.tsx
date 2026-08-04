@@ -8,6 +8,10 @@ import { formatDate, formatBytes } from 'src/lib/utils'
 import { Server, Briefcase, CheckCircle2, XCircle } from 'lucide-react'
 import { cn } from 'src/lib/utils'
 
+/** Days of history the chart shows. The server generates one bucket per day. */
+const CHART_DAYS = 7
+const RECENT_RUNS = 10
+
 // ── Custom tooltip ────────────────────────────────────────────────────────────
 function ChartTooltip({ active, payload, label }: {
   active?: boolean
@@ -28,11 +32,23 @@ function ChartTooltip({ active, payload, label }: {
   )
 }
 
-/** Local calendar day of an ISO timestamp, so buckets match the axis labels. */
-function localDayKey(d: Date): string {
-  const month = `${d.getMonth() + 1}`.padStart(2, '0')
-  const day   = `${d.getDate()}`.padStart(2, '0')
-  return `${d.getFullYear()}-${month}-${day}`
+/**
+ * Turns a server `YYYY-MM-DD` bucket into a local calendar day.
+ *
+ * `new Date('2026-08-04')` is spec'd to parse as UTC midnight, which renders as
+ * Aug 3 anywhere west of Greenwich — the axis would be off by one all day.
+ * Feeding the parts to the `Date(y, m, d)` constructor keeps it local.
+ */
+function parseServerDay(date: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date)
+  if (!m) return null
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+}
+
+/** Short axis label, falling back to the raw server string if it is unparseable. */
+function dayLabel(date: string): string {
+  const d = parseServerDay(date)
+  return d ? d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : date
 }
 
 export default function Dashboard() {
@@ -41,64 +57,56 @@ export default function Dashboard() {
 
   const { data: agents = [] } = useQuery({ queryKey: ['agents'], queryFn: ({ signal }) => api.listAgents(signal) })
   const { data: jobs = [] } = useQuery({ queryKey: ['jobs'], queryFn: ({ signal }) => api.listJobs(signal) })
-  const { data: runs = [], isError: runsError } = useQuery({ queryKey: ['runs'], queryFn: ({ signal }) => api.listRuns(undefined, signal) })
+
+  // Counters and the weekly chart come from the database, not from a page of
+  // rows: they are true totals, not "the last N runs we happened to fetch".
+  const { data: stats, isError: statsError } = useQuery({
+    queryKey: ['run-stats', CHART_DAYS],
+    queryFn: ({ signal }) => api.getRunStats(CHART_DAYS, signal),
+  })
+
+  const { data: recent, isError: recentError } = useQuery({
+    queryKey: ['runs', { limit: RECENT_RUNS, offset: 0 }],
+    queryFn: ({ signal }) => api.listRuns({ limit: RECENT_RUNS, offset: 0 }, signal),
+  })
 
   const onlineAgents = agents.filter(a => a.status === 'online').length
   const enabledJobs  = jobs.filter(j => j.enabled).length
-  const successRuns  = runs.filter(r => r.status === 'success').length
-  const failedRuns   = runs.filter(r => r.status === 'failed').length
 
-  // GET /api/runs is capped server-side, so these counters describe the window
-  // we actually received — never call it "all time".
-  const windowLabel = `of last ${runs.length} run${runs.length === 1 ? '' : 's'}`
+  const totals = stats?.totals
+  const totalRuns = totals?.total ?? 0
+  const totalLabel = `of ${totalRuns} run${totalRuns === 1 ? '' : 's'}`
 
-  // Bucket by local calendar day: the axis is labelled in local time, so
-  // grouping by the UTC date would misfile runs on either side of midnight.
-  const perDay = new Map<string, { success: number; failed: number }>()
-  for (const run of runs) {
-    if (!run.started_at) continue
-    const started = new Date(run.started_at)
-    if (Number.isNaN(started.getTime())) continue
-    const key = localDayKey(started)
-    const bucket = perDay.get(key) ?? { success: 0, failed: 0 }
-    if (run.status === 'success') bucket.success++
-    else if (run.status === 'failed') bucket.failed++
-    perDay.set(key, bucket)
-  }
-
-  const last7Days = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date()
-    d.setDate(d.getDate() - (6 - i))
-    const bucket = perDay.get(localDayKey(d)) ?? { success: 0, failed: 0 }
-    return {
-      date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      success: bucket.success,
-      failed:  bucket.failed,
-    }
-  })
+  // Already bucketed server-side, one entry per day including empty ones — only
+  // the label needs building.
+  const chartData = (stats?.daily ?? []).map(d => ({
+    date: dayLabel(d.date),
+    success: d.success,
+    failed: d.failed,
+  }))
 
   const axisColor    = isDark ? '#666' : '#999'
   const successColor = isDark ? '#d4d4d4' : '#171717'
 
-  const stats = [
-    { label: 'Agents Online', value: onlineAgents, sub: `${agents.length} registered`, icon: Server,       color: '' },
-    { label: 'Active Jobs',   value: enabledJobs,  sub: `${jobs.length} total`,        icon: Briefcase,    color: '' },
-    { label: 'Successful',    value: successRuns,  sub: windowLabel,                   icon: CheckCircle2, color: 'text-emerald-600 dark:text-emerald-400' },
-    { label: 'Failed',        value: failedRuns,   sub: windowLabel,                   icon: XCircle,      color: failedRuns > 0 ? 'text-destructive' : '' },
+  const statTiles = [
+    { label: 'Agents Online', value: onlineAgents,        sub: `${agents.length} registered`, icon: Server,       color: '' },
+    { label: 'Active Jobs',   value: enabledJobs,         sub: `${jobs.length} total`,        icon: Briefcase,    color: '' },
+    { label: 'Successful',    value: totals?.success ?? 0, sub: totalLabel,                   icon: CheckCircle2, color: 'text-emerald-600 dark:text-emerald-400' },
+    { label: 'Failed',        value: totals?.failed ?? 0,  sub: totalLabel,                   icon: XCircle,      color: (totals?.failed ?? 0) > 0 ? 'text-destructive' : '' },
   ]
 
-  const recentRuns = runs.slice(0, 10)
+  const recentRuns = recent?.runs ?? []
 
   return (
     <div className="space-y-6">
       <div className="flex items-baseline justify-between">
         <h2 className="font-sans font-bold text-2xl tracking-tight">Dashboard</h2>
-        {runsError && <p className="text-xs text-destructive">Failed to load run data.</p>}
+        {(statsError || recentError) && <p className="text-xs text-destructive">Failed to load run data.</p>}
       </div>
 
       {/* ── Stat grid ───────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 border border-border rounded-lg overflow-hidden">
-        {stats.map((stat, i) => (
+        {statTiles.map((stat, i) => (
           <div
             key={stat.label}
             className={cn(
@@ -125,15 +133,17 @@ export default function Dashboard() {
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-            Runs — Last 7 Days
-            <span className="ml-2 text-xs font-normal normal-case tracking-normal">
-              ({windowLabel.replace(/^of /, 'from the ')})
-            </span>
+            Runs — Last {stats?.days ?? CHART_DAYS} Days
+            {totals != null && (totals.running > 0 || totals.cancelled > 0) && (
+              <span className="ml-2 text-xs font-normal normal-case tracking-normal">
+                ({totals.running} running · {totals.cancelled} cancelled)
+              </span>
+            )}
           </CardTitle>
         </CardHeader>
         <CardContent>
           <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={last7Days} barGap={2} barCategoryGap="30%">
+            <BarChart data={chartData} barGap={2} barCategoryGap="30%">
               <XAxis
                 dataKey="date"
                 fontSize={11}
@@ -152,7 +162,7 @@ export default function Dashboard() {
               <Tooltip content={<ChartTooltip />} cursor={{ fill: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }} />
               <Bar dataKey="success" name="Success" radius={[3, 3, 0, 0]} fill={successColor} />
               <Bar dataKey="failed"  name="Failed"  radius={[3, 3, 0, 0]}>
-                {last7Days.map((entry, i) => (
+                {chartData.map((entry, i) => (
                   <Cell key={i} fill={entry.failed > 0 ? '#ef4444' : (isDark ? '#333' : '#e5e5e5')} />
                 ))}
               </Bar>

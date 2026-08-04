@@ -2,7 +2,7 @@ import { getToken, clearToken } from './auth'
 import type {
   Agent, BackupJob, BackupRun, StorageDestination,
   NotificationSettings, CreateJobRequest, CreateStorageRequest,
-  EmailNotificationConfig,
+  EmailNotificationConfig, RunsPage, RunsQuery, RunLogs, RunStats,
 } from './types'
 
 const LOGIN_PATH = '/login'
@@ -79,13 +79,23 @@ export const api = {
 
   cancelRun: (id: string) => request<void>('POST', `/api/runs/${id}/cancel`),
 
-  listRuns: (params?: { job_id?: string; status?: string }, signal?: AbortSignal) => {
-    const filtered = params ? Object.fromEntries(
-      Object.entries(params).filter(([, v]) => v !== undefined)
-    ) : {}
-    const qs = Object.keys(filtered).length ? new URLSearchParams(filtered as Record<string, string>).toString() : ''
-    return request<BackupRun[]>('GET', `/api/runs${qs ? '?' + qs : ''}`, undefined, signal)
+  // The server rejects an unknown `status` or a malformed `job_id` with a 400,
+  // so empty-string filters are dropped rather than forwarded.
+  listRuns: (params?: RunsQuery, signal?: AbortSignal) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params ?? {})) {
+      if (v === undefined || v === null || v === '') continue
+      qs.set(k, String(v))
+    }
+    const suffix = qs.toString()
+    return request<RunsPage>('GET', `/api/runs${suffix ? '?' + suffix : ''}`, undefined, signal)
   },
+
+  getRunLogs: (id: string, signal?: AbortSignal) =>
+    request<RunLogs>('GET', `/api/runs/${id}/logs`, undefined, signal),
+
+  getRunStats: (days: number, signal?: AbortSignal) =>
+    request<RunStats>('GET', `/api/runs/stats?days=${days}`, undefined, signal),
 
   getNotificationSettings: (signal?: AbortSignal) =>
     request<NotificationSettings | { configured: false }>('GET', '/api/settings/notifications', undefined, signal),

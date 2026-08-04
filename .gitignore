@@ -6,6 +6,7 @@ bin/
 # Compiled binaries produced by `go build` in the repo root
 /agent
 /server
+/rotate-key
 /migrate
 /nat-backup-server
 /nat-backup-agent

@@ -60,16 +60,71 @@ export interface BackupJob {
   updated_at: string
 }
 
+export type RunStatus = 'running' | 'success' | 'failed' | 'cancelled'
+
 export interface BackupRun {
   id: string
   job_id: string
   started_at: string
   finished_at: string | null
-  status: 'running' | 'success' | 'failed' | 'cancelled'
+  status: RunStatus
   size_bytes: number | null
   file_count: number | null
   error_message: string | null
   storage_path: string | null
+}
+
+/**
+ * GET /api/runs. The endpoint used to return a bare `BackupRun[]` capped at 100
+ * rows; it now pages, and `total` counts every row matching the filters — not
+ * just the ones in this page.
+ */
+export interface RunsPage {
+  runs: BackupRun[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface RunsQuery {
+  job_id?: string
+  status?: RunStatus
+  limit?: number
+  offset?: number
+}
+
+/** One persisted log line. Only terminal events are stored; progress ticks are
+ *  broadcast over the WebSocket and never written to the database. */
+export interface RunLogLine {
+  logged_at: string
+  line: string
+}
+
+export interface RunLogs {
+  run_id: string
+  status: RunStatus
+  message: string
+  lines: RunLogLine[]
+}
+
+/** One calendar day of GET /api/runs/stats. `date` is a server-side
+ *  `YYYY-MM-DD` string, not a timestamp — parse it as a local day. */
+export interface RunStatsDay {
+  date: string
+  success: number
+  failed: number
+}
+
+export interface RunStats {
+  totals: {
+    total: number
+    success: number
+    failed: number
+    running: number
+    cancelled: number
+  }
+  daily: RunStatsDay[]
+  days: number
 }
 
 export interface EmailNotificationConfig {

@@ -5,38 +5,16 @@ import { ArrowUpCircle } from 'lucide-react'
 import { api } from 'src/lib/api'
 import { StatusBadge } from 'src/components/StatusBadge'
 import { ConfirmDialog } from 'src/components/ConfirmDialog'
+import { CopyButton } from 'src/components/CopyButton'
 import { Button } from 'src/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'src/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from 'src/components/ui/dialog'
 import { Input } from 'src/components/ui/input'
 import { Label } from 'src/components/ui/label'
 import { formatRelative } from 'src/lib/utils'
-import { Trash2, RefreshCw, Plus, Copy, Check, Terminal } from 'lucide-react'
+import { Trash2, RefreshCw, Plus, Terminal } from 'lucide-react'
 import { cn } from 'src/lib/utils'
 import type { Agent } from 'src/lib/types'
-
-// ── Copy button ───────────────────────────────────────────────────────────────
-function CopyButton({ text, className }: { text: string; className?: string }) {
-  const [copied, setCopied] = useState(false)
-  function copy() {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    })
-  }
-  return (
-    <button
-      onClick={copy}
-      className={cn(
-        'flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors',
-        className,
-      )}
-    >
-      {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
-      {copied ? 'Copiado' : 'Copiar'}
-    </button>
-  )
-}
 
 // ── Code block ────────────────────────────────────────────────────────────────
 function CodeBlock({ code, label }: { code: string; label?: string }) {
@@ -48,7 +26,11 @@ function CodeBlock({ code, label }: { code: string; label?: string }) {
           {code}
         </pre>
         <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
-          <CopyButton text={code} className="bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded" />
+          <CopyButton
+            text={code}
+            label={label ? `Copy ${label.toLowerCase()}` : 'Copy'}
+            className="bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded"
+          />
         </div>
       </div>
     </div>
@@ -146,7 +128,7 @@ export default function Agents() {
   function handleCreate(e: React.FormEvent) {
     e.preventDefault()
     setNameError('')
-    if (!newName.trim()) { setNameError('El nombre es requerido'); return }
+    if (!newName.trim()) { setNameError('Name is required'); return }
     createMut.mutate(newName.trim())
   }
 
@@ -338,7 +320,7 @@ export default function Agents() {
                     <code className="flex-1 font-mono text-xs bg-muted border border-border rounded px-3 py-2 break-all">
                       {modal.apiKey}
                     </code>
-                    <CopyButton text={modal.apiKey} className="shrink-0 px-2 py-2 bg-muted border border-border rounded hover:bg-accent" />
+                    <CopyButton text={modal.apiKey} label="Copy API key" iconOnly className="shrink-0 px-2 py-2 bg-muted border border-border rounded hover:bg-accent" />
                   </div>
                 </div>
 

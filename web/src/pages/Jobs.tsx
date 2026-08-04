@@ -174,6 +174,7 @@ export default function Jobs() {
     mutationFn: (id: string) => api.triggerJob(id),
     onSuccess: (_, id) => {
       qc.invalidateQueries({ queryKey: ['runs'] })
+      qc.invalidateQueries({ queryKey: ['run-stats'] })
       const name = jobs.find(j => j.id === id)?.name ?? 'Job'
       toast.success(`"${name}" dispatched — check Runs for progress`)
     },

@@ -1,41 +1,40 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api } from 'src/lib/api'
 import { getToken } from 'src/lib/auth'
 import { StatusBadge } from 'src/components/StatusBadge'
+import { CopyButton } from 'src/components/CopyButton'
 import { Button } from 'src/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'src/components/ui/card'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from 'src/components/ui/sheet'
 import { formatDate, formatBytes, formatRelative } from 'src/lib/utils'
-import { FileText, X } from 'lucide-react'
+import { FileText, X, ChevronLeft, ChevronRight, Archive, AlertTriangle } from 'lucide-react'
 import { cn } from 'src/lib/utils'
-import type { BackupRun } from 'src/lib/types'
+import type { Agent, BackupJob, BackupRun, RunStatus, StorageDestination } from 'src/lib/types'
 
 /** Rendered scrollback per run. */
 const MAX_LOG_LINES = 2000
 const BASE_RECONNECT_MS = 1_000
 const MAX_RECONNECT_MS = 15_000
 const MAX_RECONNECT_ATTEMPTS = 5
+const PAGE_SIZE = 50
+/** How often the stored log is re-read while a run is still going. */
+const LOG_POLL_MS = 5_000
 
-/** Synthetic transcript for a run that already finished. */
-function summaryLines(run: BackupRun): string[] {
-  const lines: string[] = []
-  if (run.status === 'success') {
-    lines.push(`✓ Backup completed successfully`)
-    if (run.file_count != null) lines.push(`  Files backed up: ${run.file_count}`)
-    if (run.size_bytes  != null) lines.push(`  Total size: ${formatBytes(run.size_bytes)}`)
-    if (run.storage_path)        lines.push(`  Stored at: ${run.storage_path}`)
-    if (run.finished_at)         lines.push(`  Finished: ${new Date(run.finished_at).toLocaleString()}`)
-  } else if (run.status === 'failed') {
-    lines.push(`✗ Backup failed`)
-    if (run.error_message) lines.push(`  Error: ${run.error_message}`)
-    if (run.finished_at)   lines.push(`  Failed at: ${new Date(run.finished_at).toLocaleString()}`)
-  } else if (run.status === 'cancelled') {
-    lines.push(`⊘ Run cancelled by user`)
-    if (run.finished_at)  lines.push(`  Cancelled at: ${new Date(run.finished_at).toLocaleString()}`)
-  }
-  return lines
+// ── Log model ─────────────────────────────────────────────────────────────────
+
+/** A line ready to render. `at` is the server timestamp, or null for a live line
+ *  that has not been persisted (progress ticks never are). */
+interface RenderLine {
+  at: string | null
+  line: string
+}
+
+function formatLogTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
 interface LiveState {
@@ -48,20 +47,14 @@ interface LiveState {
 const emptyLive: LiveState = { runId: '', connected: false, error: '', lines: [] }
 
 /**
- * Streams logs for a running backup. Finished runs render a summary derived
- * from the run itself — no state, so switching runs can never show stale lines.
+ * Streams live output for a running backup.
+ *
+ * Only terminal events are persisted server-side, so this socket is the only
+ * source of progress ticks — but it exists only while the run is active.
  */
-function useLiveLogs(run: BackupRun | null) {
-  const runId = run?.id ?? null
-  const isRunning = run?.status === 'running'
-
+function useLiveLogs(runId: string | null, isRunning: boolean) {
   const [live, setLive] = useState<LiveState>(emptyLive)
   const wsRef = useRef<WebSocket | null>(null)
-
-  const summary = useMemo(
-    () => (run && run.status !== 'running' ? summaryLines(run) : []),
-    [run]
-  )
 
   useEffect(() => {
     if (!runId || !isRunning) return
@@ -138,85 +131,264 @@ function useLiveLogs(run: BackupRun | null) {
   }, [runId, isRunning])
 
   const active = live.runId === runId ? live : emptyLive
+  return { lines: active.lines, connected: isRunning && active.connected, error: isRunning ? active.error : '' }
+}
 
-  // Memoised so the identity only changes when the content does — consumers
-  // scroll on `logs` changing.
-  const logs = useMemo(
-    // Once the run ends, keep whatever we streamed and append the summary
-    // instead of discarding the live output.
-    () => (isRunning ? active.lines : [...active.lines, ...summary]),
-    [isRunning, active.lines, summary]
-  )
+/**
+ * The log of a run: whatever the server stored, plus the live stream while the
+ * run is still going.
+ *
+ * The stored log is authoritative for a finished run — the UI no longer invents
+ * cosmetic summary lines, so a run with nothing stored shows an honest empty.
+ */
+function useRunLogs(run: BackupRun | null) {
+  const runId = run?.id ?? null
+
+  const { data: stored, isLoading, isError } = useQuery({
+    queryKey: ['run-logs', runId],
+    queryFn: ({ signal }) => {
+      if (runId === null) throw new Error('no run selected')
+      return api.getRunLogs(runId, signal)
+    },
+    enabled: runId !== null,
+    // The terminal line lands in the table only when the run ends, so keep
+    // re-reading while it is active.
+    refetchInterval: run?.status === 'running' ? LOG_POLL_MS : false,
+  })
+
+  // The logs endpoint reports the run's current status, which stays fresh even
+  // when the run's row is no longer on the page being displayed.
+  const status: RunStatus | null = stored?.status ?? run?.status ?? null
+  const isRunning = status === 'running'
+
+  const live = useLiveLogs(runId, isRunning)
+
+  const logs = useMemo<RenderLine[]>(() => {
+    const storedLines = stored?.lines ?? []
+    if (live.lines.length === 0) {
+      return storedLines.map(l => ({ at: l.logged_at, line: l.line }))
+    }
+
+    // A terminal event is both broadcast and persisted, so it can appear in both
+    // sources. The live copy wins on ordering (it sits after the progress ticks
+    // that were never stored) but borrows the stored timestamp once written.
+    const seenLive = new Set(live.lines)
+    const storedAt = new Map(storedLines.map(l => [l.line, l.logged_at]))
+    return [
+      ...storedLines.filter(l => !seenLive.has(l.line)).map(l => ({ at: l.logged_at, line: l.line })),
+      ...live.lines.map(line => ({ at: storedAt.get(line) ?? null, line })),
+    ]
+  }, [stored, live.lines])
 
   return {
     logs,
-    connected: isRunning && active.connected,
-    error: isRunning ? active.error : '',
+    status,
+    isRunning,
+    isLoading,
+    isError,
+    connected: live.connected,
+    streamError: live.error,
   }
 }
 
-const FILTERS = ['', 'running', 'success', 'failed', 'cancelled'] as const
+// ── Restore ───────────────────────────────────────────────────────────────────
+
+/** Quotes a value for a POSIX shell. Job names flow into the archive filename
+ *  and may contain spaces, so the command has to survive them verbatim. */
+function shellQuote(v: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(v) ? v : `'${v.replace(/'/g, `'\\''`)}'`
+}
+
+const RESTORE_DEST = '/path/to/restore'
+
+/**
+ * The exact command an operator runs to recover a finished backup.
+ *
+ * There is no restore endpoint on the server — restore is an agent-side CLI
+ * operation — so this shows the command rather than pretending to trigger one.
+ */
+function RestorePanel({ run, job, destination, agent }: {
+  run: BackupRun
+  job: BackupJob | undefined
+  destination: StorageDestination | undefined
+  agent: Agent | undefined
+}) {
+  const archive = run.storage_path
+  if (!archive) return null
+
+  const bin = agent?.os === 'windows' ? 'nat-backup-agent.exe' : 'nat-backup-agent'
+  const remote = destination?.type === 's3' || destination?.type === 'sftp'
+
+  // storage_path is the archive *name* inside the destination, not an absolute
+  // path — for a remote destination the operator pulls it through --from-storage.
+  const command = remote
+    ? `${bin} restore --from-storage ./destination.json --name ${shellQuote(archive)} --dest ${RESTORE_DEST}`
+    : `${bin} restore --file ${shellQuote(archive)} --dest ${RESTORE_DEST}`
+
+  return (
+    <div className="shrink-0 rounded border border-border bg-muted/30 p-3 space-y-2">
+      <div className="flex items-center gap-2">
+        <Archive aria-hidden="true" className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Restore</span>
+        <CopyButton text={command} label="Copy restore command" className="ml-auto" />
+      </div>
+
+      <pre className="bg-zinc-950 border border-zinc-800 rounded p-2.5 text-[11px] text-zinc-300 font-mono overflow-x-auto whitespace-pre-wrap break-all leading-relaxed">
+        {command}
+      </pre>
+
+      <ul className="text-[11px] text-muted-foreground space-y-1 leading-relaxed">
+        <li>
+          Run it on the agent host{agent?.name ? <> (<span className="font-medium text-foreground">{agent.name}</span>)</> : null}
+          {' '}and replace <code className="font-mono">{RESTORE_DEST}</code> with the target directory.
+        </li>
+        {remote ? (
+          <li>
+            <code className="font-mono">destination.json</code> holds the{' '}
+            <span className="font-medium text-foreground">{destination?.name}</span> config as{' '}
+            <code className="font-mono">{'{"type":"'}{destination?.type}{'","config":{…}}'}</code> — the same shape
+            the server stores. Credentials are encrypted at rest and are never sent to this page.
+          </li>
+        ) : (
+          <li>
+            The archive lives under the{' '}
+            {destination?.name ? <span className="font-medium text-foreground">{destination.name}</span> : 'configured'}
+            {' '}destination directory on that host; pass the full path to <code className="font-mono">--file</code>.
+          </li>
+        )}
+        <li>Append <code className="font-mono">--dry-run</code> to list the contents without writing anything.</li>
+      </ul>
+
+      {job?.encrypt && (
+        <p className="flex gap-2 text-[11px] text-amber-600 dark:text-amber-500 leading-relaxed">
+          <AlertTriangle aria-hidden="true" className="h-3.5 w-3.5 shrink-0 mt-px" />
+          <span>
+            This backup is encrypted. Export <code className="font-mono">NAT_BACKUP_PASSPHRASE</code> before running
+            (the flag would leak it to the process list) or the agent will prompt for it. Without the job&apos;s
+            passphrase the archive cannot be recovered.
+          </span>
+        </p>
+      )}
+    </div>
+  )
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
+
+const FILTERS: { value: '' | RunStatus; label: string }[] = [
+  { value: '',          label: 'All' },
+  { value: 'running',   label: 'Running' },
+  { value: 'success',   label: 'Success' },
+  { value: 'failed',    label: 'Failed' },
+  { value: 'cancelled', label: 'Cancelled' },
+]
 
 export default function Runs() {
   const queryClient = useQueryClient()
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
-  const [filterStatus, setFilterStatus] = useState<string>('')
-  const logsEndRef = useRef<HTMLDivElement>(null)
+  const [selected, setSelected] = useState<BackupRun | null>(null)
+  const [filterStatus, setFilterStatus] = useState<'' | RunStatus>('')
+  const [offset, setOffset] = useState(0)
+  const terminalRef = useRef<HTMLDivElement>(null)
 
   const cancelMutation = useMutation({
     mutationFn: (runId: string) => api.cancelRun(runId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['runs'] })
+      queryClient.invalidateQueries({ queryKey: ['run-logs'] })
+      queryClient.invalidateQueries({ queryKey: ['run-stats'] })
       toast.success('Run cancelled')
-      setSelectedRunId(null)
+      setSelected(null)
     },
     onError: (err: Error) => toast.error(`Failed to cancel: ${err.message}`),
   })
 
-  const { data: runs = [], isLoading, isError } = useQuery({
-    queryKey: ['runs'],
-    queryFn: ({ signal }) => api.listRuns(undefined, signal),
+  // The key carries the filters and the page: without them react-query would
+  // hand back another page's rows from cache.
+  const { data, isLoading, isError, isFetching } = useQuery({
+    queryKey: ['runs', { limit: PAGE_SIZE, offset, status: filterStatus }],
+    queryFn: ({ signal }) => api.listRuns(
+      { limit: PAGE_SIZE, offset, status: filterStatus || undefined },
+      signal,
+    ),
     refetchInterval: 5_000,
+    // Keeps the current page on screen while the next one loads, instead of
+    // collapsing the table to a spinner on every click.
+    placeholderData: keepPreviousData,
   })
+
+  const runs = data?.runs ?? []
+  const total = data?.total ?? 0
 
   const { data: jobs = [] } = useQuery({
     queryKey: ['jobs'],
     queryFn: ({ signal }) => api.listJobs(signal),
   })
+  const { data: agents = [] } = useQuery({
+    queryKey: ['agents'],
+    queryFn: ({ signal }) => api.listAgents(signal),
+  })
+  const { data: destinations = [] } = useQuery({
+    queryKey: ['storage'],
+    queryFn: ({ signal }) => api.listStorage(signal),
+  })
 
-  // Read the selection out of the polled list so an open drawer follows the
-  // run's real status instead of freezing on the snapshot taken at click time.
-  const selectedRun = selectedRunId ? runs.find(r => r.id === selectedRunId) ?? null : null
+  // Retention can shrink the history under an open page. Rather than correcting
+  // the offset from an effect — which would cascade a second render on every
+  // poll — the overshoot is rendered as its own state with a way out.
+  const pastEnd = !isLoading && !isError && offset > 0 && runs.length === 0 && total > 0
 
-  const { logs, connected, error: logsError } = useLiveLogs(selectedRun)
+  function applyFilter(status: '' | RunStatus) {
+    setFilterStatus(status)
+    setOffset(0) // page N of the old filter is meaningless under the new one
+  }
 
+  // Prefer the polled row so an open drawer follows the run's real status, and
+  // fall back to the snapshot taken at click time so paging away — or the row
+  // ageing off the page — does not blank the drawer.
+  const selectedRun = selected ? runs.find(r => r.id === selected.id) ?? selected : null
+  const selectedJob = selectedRun ? jobs.find(j => j.id === selectedRun.job_id) : undefined
+  const selectedAgent = selectedJob ? agents.find(a => a.id === selectedJob.agent_id) : undefined
+  const selectedDestination = selectedJob
+    ? destinations.find(d => d.id === selectedJob.storage_destination_id)
+    : undefined
+
+  const { logs, status: liveStatus, isRunning, isLoading: logsLoading, isError: logsFailed, connected, streamError } =
+    useRunLogs(selectedRun)
+
+  // Scrolls the terminal itself rather than calling scrollIntoView, which walks
+  // every scrollable ancestor and would drag the drawer body along with it.
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const el = terminalRef.current
+    if (el) el.scrollTop = el.scrollHeight
   }, [logs])
 
-  const filtered = filterStatus ? runs.filter(r => r.status === filterStatus) : runs
+  const rangeFrom = runs.length === 0 ? 0 : offset + 1
+  const rangeTo = offset + runs.length
+  const hasPrev = offset > 0
+  const hasNext = offset + PAGE_SIZE < total
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="font-sans font-bold text-2xl tracking-tight">Run History</h2>
 
-        {/* Filter pills */}
+        {/* Filter pills — applied server-side, so they filter the whole history
+            rather than just the page on screen. */}
         <div className="flex gap-1" role="group" aria-label="Filter runs by status">
-          {FILTERS.map(s => (
+          {FILTERS.map(f => (
             <button
-              key={s}
+              key={f.value}
               type="button"
-              onClick={() => setFilterStatus(s)}
-              aria-pressed={filterStatus === s}
+              onClick={() => applyFilter(f.value)}
+              aria-pressed={filterStatus === f.value}
               className={cn(
                 'px-3 py-1 rounded text-xs font-medium transition-colors',
-                filterStatus === s
+                filterStatus === f.value
                   ? 'bg-foreground text-background'
                   : 'text-muted-foreground hover:text-foreground hover:bg-accent'
               )}
             >
-              {s || 'All'}
+              {f.label}
             </button>
           ))}
         </div>
@@ -226,26 +398,40 @@ export default function Runs() {
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
             Runs
-            {filtered.length > 0 && (
-              <span className="ml-2 text-xs font-normal normal-case">({filtered.length})</span>
+            {total > 0 && (
+              <span className="ml-2 text-xs font-normal normal-case tabular-nums">
+                ({total.toLocaleString('en-US')})
+              </span>
             )}
           </CardTitle>
         </CardHeader>
         <CardContent className="px-0">
           {isLoading && <p className="text-sm text-muted-foreground px-6 py-4">Loading…</p>}
           {isError   && <p className="text-sm text-destructive px-6 py-4">Failed to load data.</p>}
-          {!isLoading && filtered.length === 0 && (
-            <p className="text-sm text-muted-foreground px-6 py-4">No runs found.</p>
-          )}
+          {pastEnd ? (
+            <div className="px-6 py-4 flex items-center gap-3">
+              <p className="text-sm text-muted-foreground">
+                This page is past the end of the history — {total.toLocaleString('en-US')} run
+                {total === 1 ? '' : 's'} remain.
+              </p>
+              <Button variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => setOffset(0)}>
+                Go to first page
+              </Button>
+            </div>
+          ) : (!isLoading && !isError && runs.length === 0 && (
+            <p className="text-sm text-muted-foreground px-6 py-4">
+              {filterStatus ? `No ${filterStatus} runs found.` : 'No runs found.'}
+            </p>
+          ))}
           <div>
-            {filtered.map((run, i) => {
+            {runs.map((run, i) => {
               const job = jobs.find(j => j.id === run.job_id)
               return (
                 <div
                   key={run.id}
                   className={cn(
                     'flex items-center gap-4 px-6 py-3 hover:bg-accent/50 transition-colors group',
-                    i < filtered.length - 1 && 'border-b border-border'
+                    i < runs.length - 1 && 'border-b border-border'
                   )}
                 >
                   <StatusBadge status={run.status} className="w-16 shrink-0" />
@@ -282,7 +468,7 @@ export default function Runs() {
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
-                    onClick={() => setSelectedRunId(run.id)}
+                    onClick={() => setSelected(run)}
                     title="View logs"
                     aria-label={`View logs for run ${run.id.slice(0, 8)}`}
                   >
@@ -293,10 +479,46 @@ export default function Runs() {
             })}
           </div>
         </CardContent>
+
+        {/* ── Pagination ─────────────────────────────────────────────────── */}
+        {total > 0 && (
+          <div className="flex items-center justify-between gap-4 border-t border-border px-6 py-3">
+            <p className="text-xs text-muted-foreground tabular-nums" aria-live="polite">
+              {runs.length === 0
+                ? `0 of ${total.toLocaleString('en-US')}`
+                : `${rangeFrom.toLocaleString('en-US')}–${rangeTo.toLocaleString('en-US')} of ${total.toLocaleString('en-US')}`}
+              {isFetching && <span className="ml-2 opacity-60">updating…</span>}
+            </p>
+            <nav className="flex items-center gap-1" aria-label="Run history pages">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={() => setOffset(o => Math.max(0, o - PAGE_SIZE))}
+                disabled={!hasPrev}
+                aria-label="Previous page of runs"
+              >
+                <ChevronLeft aria-hidden="true" className="h-3.5 w-3.5 mr-1" />
+                Previous
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={() => setOffset(o => o + PAGE_SIZE)}
+                disabled={!hasNext}
+                aria-label="Next page of runs"
+              >
+                Next
+                <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 ml-1" />
+              </Button>
+            </nav>
+          </div>
+        )}
       </Card>
 
       {/* ── Log drawer ──────────────────────────────────────────────── */}
-      <Sheet open={selectedRun !== null} onOpenChange={(o) => !o && setSelectedRunId(null)}>
+      <Sheet open={selectedRun !== null} onOpenChange={(o) => !o && setSelected(null)}>
         <SheetContent side="right" className="w-full sm:max-w-2xl flex flex-col gap-0 p-0">
           <SheetHeader className="px-5 py-4 border-b">
             <SheetTitle className="flex items-center gap-3 text-sm">
@@ -306,8 +528,8 @@ export default function Runs() {
                   <span className="font-mono text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
                     {selectedRun.id.slice(0, 8)}
                   </span>
-                  <StatusBadge status={selectedRun.status} />
-                  {selectedRun.status === 'running' && (
+                  <StatusBadge status={liveStatus ?? selectedRun.status} />
+                  {isRunning && (
                     <>
                       <span className={cn('text-xs', connected ? 'text-emerald-500' : 'text-muted-foreground')}>
                         {connected ? '● live' : '○ connecting…'}
@@ -330,53 +552,80 @@ export default function Runs() {
           </SheetHeader>
 
           {selectedRun && (
-            <div className="flex-1 overflow-hidden flex flex-col p-5 gap-3">
+            <div className="flex-1 overflow-y-auto flex flex-col p-5 gap-3">
               {/* Meta row */}
-              <div className="flex items-center gap-4 text-xs text-muted-foreground">
+              <div className="flex items-center gap-4 text-xs text-muted-foreground shrink-0">
                 <span>{formatDate(selectedRun.started_at)}</span>
                 {selectedRun.size_bytes != null && <span>{formatBytes(selectedRun.size_bytes)}</span>}
                 {selectedRun.file_count != null && <span>{selectedRun.file_count} files</span>}
               </div>
 
               {selectedRun.error_message && (
-                <div className="p-3 bg-destructive/8 border border-destructive/25 rounded text-xs text-destructive">
+                <div className="p-3 bg-destructive/8 border border-destructive/25 rounded text-xs text-destructive shrink-0">
                   {selectedRun.error_message}
                 </div>
               )}
 
-              {logsError && (
-                <p role="status" className="text-xs text-muted-foreground">{logsError}</p>
+              {!isRunning && (
+                <RestorePanel
+                  run={selectedRun}
+                  job={selectedJob}
+                  destination={selectedDestination}
+                  agent={selectedAgent}
+                />
+              )}
+
+              {streamError && (
+                <p role="status" className="text-xs text-muted-foreground shrink-0">{streamError}</p>
+              )}
+              {logsFailed && (
+                <p role="status" className="text-xs text-destructive shrink-0">Failed to load the stored log.</p>
               )}
 
               {/* Terminal */}
               <div
-                className="flex-1 bg-zinc-950 rounded border border-zinc-800 p-4 font-mono text-xs overflow-auto min-h-0"
+                ref={terminalRef}
+                className="flex-1 bg-zinc-950 rounded border border-zinc-800 p-4 font-mono text-xs overflow-auto min-h-40"
                 role="log"
                 aria-live="polite"
                 aria-label="Run output"
               >
                 {logs.length === 0 ? (
                   <span className="text-zinc-600">
-                    {selectedRun.status === 'running' ? 'Waiting for output…' : 'No output recorded.'}
+                    {logsLoading ? 'Loading log…'
+                      : isRunning ? 'Waiting for output…'
+                      : 'No log lines were stored for this run.'}
                   </span>
                 ) : (
-                  logs.map((line, i) => (
-                    <div
-                      key={i}
-                      className={cn(
-                        'whitespace-pre-wrap leading-relaxed',
-                        line.startsWith('✓') ? 'text-emerald-400' :
-                        line.startsWith('✗') ? 'text-red-400' :
-                        line.startsWith('⊘') ? 'text-zinc-500' :
-                        'text-zinc-300'
-                      )}
-                    >
-                      {line}
+                  logs.map((entry, i) => (
+                    <div key={i} className="flex gap-2 leading-relaxed">
+                      <span
+                        className="text-zinc-600 shrink-0 tabular-nums select-none"
+                        title={entry.at ? new Date(entry.at).toLocaleString() : 'Live output — not stored'}
+                      >
+                        {entry.at ? formatLogTime(entry.at) : '   ·    '}
+                      </span>
+                      <span
+                        className={cn(
+                          'whitespace-pre-wrap break-all',
+                          entry.line.startsWith('completed:') ? 'text-emerald-400' :
+                          entry.line.startsWith('failed:')    ? 'text-red-400' :
+                          'text-zinc-300'
+                        )}
+                      >
+                        {entry.line}
+                      </span>
                     </div>
                   ))
                 )}
-                <div ref={logsEndRef} />
               </div>
+
+              {logs.length > 0 && (
+                <p className="text-[11px] text-muted-foreground shrink-0">
+                  Timestamped lines are stored server-side; lines marked <span className="font-mono">·</span> are live
+                  progress and are not kept.
+                </p>
+              )}
             </div>
           )}
         </SheetContent>
