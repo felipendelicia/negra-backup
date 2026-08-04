@@ -17,6 +17,7 @@ type Config struct {
 	TLSEnabled    bool
 	TLSCertFile   string
 	TLSKeyFile    string
+	UploadDir     string
 }
 
 func Load() (Config, error) {
@@ -43,6 +44,7 @@ func Load() (Config, error) {
 		EncryptionKey: get("ENCRYPTION_KEY"),
 		AdminPassword: get("ADMIN_PASSWORD"),
 		Port:          getOr("PORT", "8080"),
+		UploadDir:     getOr("UPLOAD_DIR", "./data/uploads"),
 		TLSCertFile:   os.Getenv("TLS_CERT_FILE"),
 		TLSKeyFile:    os.Getenv("TLS_KEY_FILE"),
 	}

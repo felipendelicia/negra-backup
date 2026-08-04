@@ -15,6 +15,10 @@ import (
 
 const maxUploadMemory = 32 << 20
 
+// maxUploadBytes caps a single agent upload. The endpoint previously accepted an
+// unbounded body straight to disk.
+const maxUploadBytes = 100 << 30 // 100 GiB
+
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	runID, err := uuid.Parse(chi.URLParam(r, "run_id"))
 	if err != nil {
@@ -56,14 +60,17 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	destDir := filepath.Join(os.TempDir(), "nat-backup-uploads", runID.String())
-	if err := os.MkdirAll(destDir, 0700); err != nil {
+	// Uploads used to land in os.TempDir() while being recorded as the run's
+	// permanent storage_path — so the OS could reap the only copy of a backup that
+	// the database still claimed existed. UPLOAD_DIR defaults to ./data/uploads.
+	destDir := filepath.Join(s.cfg.UploadDir, runID.String())
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		log.Printf("handleUpload: mkdir: %v", err)
 		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	destPath := filepath.Join(destDir, filepath.Base(header.Filename))
-	dst, err := os.Create(destPath)
+	dst, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		log.Printf("handleUpload: create file: %v", err)
 		respondError(w, http.StatusInternalServerError, "internal server error")
@@ -71,9 +78,21 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer dst.Close()
 
-	size, err := io.Copy(dst, file)
+	// Cap the write so a single agent cannot fill the server's disk.
+	size, err := io.Copy(dst, io.LimitReader(file, maxUploadBytes+1))
 	if err != nil {
 		log.Printf("handleUpload: write file: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if size > maxUploadBytes {
+		os.Remove(destPath)
+		respondError(w, http.StatusRequestEntityTooLarge, "upload exceeds maximum size")
+		return
+	}
+	// Close flushes; skipping the check records a truncated archive as a success.
+	if err := dst.Close(); err != nil {
+		log.Printf("handleUpload: close file: %v", err)
 		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
