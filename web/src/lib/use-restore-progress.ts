@@ -4,21 +4,21 @@ import { getToken } from './auth'
 /**
  * Watching a restore happen.
  *
- * The restore reports on two channels and needs both:
+ * The restore reports on two channels and both are read:
  *
- *  - `/api/runs/{id}/logs/ws` is where the server broadcasts `restore_progress`,
- *    `restore_done` and `restore_failed` (internal/ws/handler.go). It carries the
- *    per-file ticks — but the handler only keeps the socket open while the run's
- *    row says `running`, and only a *finished* run can be restored, so today it
- *    closes the connection immediately with "run not active". It is opened anyway:
- *    it costs one handshake, and the day that check is relaxed the per-file
- *    progress appears here with no change on this side.
+ *  - `/api/runs/{id}/logs/ws` — the run's own stream, where the server publishes
+ *    `restore_progress`, `restore_done` and `restore_failed`
+ *    (internal/ws/handler.go). This is the authoritative one: it carries the
+ *    per-file ticks and the final counts.
  *
- *  - `/ws/console` is the server's own log, which does reach the browser for a
- *    finished run. The dispatch, the agent's "restoring … (restore <id>)", the
- *    agent's warnings, and the final "restore <id> completed/failed on agent …"
- *    all pass through it, every one of them carrying the run id. Filtering on that
- *    id is what makes the outcome visible today.
+ *  - `/ws/console` — the server's log. It adds what the run stream does not
+ *    carry: the dispatch line, which archive the agent opened, and the agent's
+ *    own non-fatal warnings ("skipping symlink …"), which are written with
+ *    `log.Printf` and forwarded as `agent_log`. Every one of them names the run
+ *    id, which is how they are told apart from other jobs' traffic.
+ *
+ * Both describe the same events, so the terminal line is deduplicated (see
+ * `push`) rather than shown two or three times over.
  *
  * Neither socket replays history, so both are opened before the POST is sent.
  */
@@ -26,6 +26,15 @@ import { getToken } from './auth'
 const BASE_RECONNECT_MS = 1_000
 const MAX_RECONNECT_MS = 15_000
 const MAX_ATTEMPTS = 5
+/**
+ * A close this soon after opening, with nothing sent, is a server that accepted
+ * the handshake only to refuse the subscription — which is what a server from
+ * before the run stream was opened to finished runs does with every restore.
+ * Reconnecting into that is an endless handshake loop, because a socket that
+ * opens resets the backoff.
+ */
+const REFUSAL_MS = 1_000
+const MAX_REFUSALS = 2
 /** Rendered scrollback. A restore of a large tree can emit a line per file. */
 const MAX_LINES = 2_000
 
@@ -121,30 +130,29 @@ export function useRestoreProgress(runId: string | null, active: boolean): Resto
     const push = (text: string) => {
       if (cancelled) return
       setState(prev => {
-        const outcome = prev.outcome === 'pending' ? classify(text) : prev.outcome
+        const verdict = classify(text)
+        // The end of a restore is announced up to three times — by the agent, by
+        // the server's log, and on the run's own stream — and all three arrive
+        // here. The first one wins; the rest are dropped rather than shown as
+        // three different-looking ways of saying "it worked".
+        if (verdict !== 'pending' && prev.outcome !== 'pending') return prev
         return {
           ...prev,
           lines: [...prev.lines, { id: ++idRef.current, text }].slice(-MAX_LINES),
-          outcome,
-          outcomeDetail: outcome !== 'pending' && prev.outcome === 'pending' ? text : prev.outcomeDetail,
+          outcome: prev.outcome === 'pending' ? verdict : prev.outcome,
+          outcomeDetail: verdict !== 'pending' && prev.outcome === 'pending' ? text : prev.outcomeDetail,
         }
       })
     }
 
-    /**
-     * One reconnecting socket.
-     *
-     * `giveUpWhenSilent` is for the run-log stream: the server accepts the
-     * handshake and closes it again without sending anything, so retrying on a
-     * backoff would be an infinite loop of handshakes against a check that will
-     * not change while this restore runs.
-     */
+    /** One reconnecting socket. */
     function connect(
       path: string,
       onLine: (text: string) => void,
-      opts: { giveUpWhenSilent?: boolean; onOpen?: (up: boolean) => void } = {},
+      opts: { onOpen?: (up: boolean) => void } = {},
     ) {
       let attempt = 0
+      let refusals = 0
 
       const open = () => {
         if (cancelled) return
@@ -159,13 +167,18 @@ export function useRestoreProgress(runId: string | null, active: boolean): Resto
         sockets.add(ws)
 
         let received = false
+        let openedAt = 0
 
         ws.onopen = () => {
+          // A socket that stays up resets the backoff; one that is accepted and
+          // dropped straight away does not get to reset it forever.
+          openedAt = Date.now()
           attempt = 0
           opts.onOpen?.(true)
         }
         ws.onmessage = (e) => {
           received = true
+          refusals = 0
           onLine((e.data as string).replace(/\n$/, ''))
         }
         // onerror is always followed by onclose; reconnect logic lives there only.
@@ -174,7 +187,10 @@ export function useRestoreProgress(runId: string | null, active: boolean): Resto
           sockets.delete(ws)
           if (cancelled) return
           opts.onOpen?.(false)
-          if (opts.giveUpWhenSilent && !received) return
+          if (!received && openedAt > 0 && Date.now() - openedAt < REFUSAL_MS) {
+            refusals++
+            if (refusals >= MAX_REFUSALS) return // this server will not serve it
+          }
           retry()
         }
       }
@@ -193,26 +209,22 @@ export function useRestoreProgress(runId: string | null, active: boolean): Resto
       open()
     }
 
-    // The console stream is the one that actually delivers today, so it owns the
-    // "watching" flag and the connection status the panel shows.
-    connect(
-      '/ws/console',
-      (text) => { if (belongsToRestore(text, runId)) push(text) },
-      {
-        onOpen: (up) => {
-          if (cancelled) return
-          setState(prev => ({
-            ...prev,
-            watching: up,
-            status: up ? '' : 'Server log stream lost — reconnecting…',
-          }))
-        },
+    // The run's own stream: per-file progress and the final counts. It owns the
+    // "watching" flag, because losing it is what actually blinds the panel.
+    connect(`/api/runs/${runId}/logs/ws`, push, {
+      onOpen: (up) => {
+        if (cancelled) return
+        setState(prev => ({
+          ...prev,
+          watching: up,
+          status: up ? '' : 'Progress stream lost — reconnecting…',
+        }))
       },
-    )
+    })
 
-    // Per-file progress, if the server ever keeps this socket open for a
-    // finished run. Silent failure is expected and is not reported.
-    connect(`/api/runs/${runId}/logs/ws`, push, { giveUpWhenSilent: true })
+    // The server log, for the context the run stream does not carry: which
+    // archive was opened, and the agent's non-fatal warnings.
+    connect('/ws/console', (text) => { if (belongsToRestore(text, runId)) push(text) })
 
     return () => {
       cancelled = true

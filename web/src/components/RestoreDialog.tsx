@@ -518,7 +518,7 @@ function RestoreProgressPanel({
           <span className="text-zinc-600">
             {progress.watching
               ? 'Waiting for the agent to report…'
-              : 'Connecting to the server log…'}
+              : 'Connecting to the progress stream…'}
           </span>
         ) : (
           progress.lines.map(l => (
@@ -538,8 +538,8 @@ function RestoreProgressPanel({
       </div>
 
       <p className="text-[11px] text-muted-foreground leading-relaxed">
-        Progress is read from the server log, which is where the agent reports a restore. Closing
-        this dialog stops watching; it does not stop the restore.
+        Progress comes from this run&apos;s log stream, plus the server log for the agent&apos;s own
+        warnings. Closing this dialog stops watching; it does not stop the restore.
       </p>
     </div>
   )
