@@ -115,7 +115,7 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 
 	limit, offset := parsePagination(q)
 	query := `SELECT id, job_id, started_at, finished_at, status, size_bytes, file_count,
-	                 error_message, storage_path
+	                 error_message, storage_path, checksum
 	          FROM backup_runs` + where +
 		fmt.Sprintf(" ORDER BY started_at DESC LIMIT $%d OFFSET $%d", i, i+1)
 	args = append(args, limit, offset)
