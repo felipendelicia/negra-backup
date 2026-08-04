@@ -36,7 +36,6 @@ func main() {
 			if err := install(); err != nil {
 				log.Fatalf("install failed: %v", err)
 			}
-			fmt.Println("agent installed as system service")
 			return
 		case "restore":
 			if err := runRestore(os.Args[2:]); err != nil {
@@ -475,9 +474,28 @@ WantedBy=multi-user.target
 	return nil
 }
 
+// installWindows explains how to run the agent as a service.
+//
+// It deliberately does not suggest "sc create". This binary does not implement the
+// Windows Service Control Manager protocol (golang.org/x/sys/windows/svc), so a
+// service registered that way never answers the SCM and dies with error 1053 —
+// which is exactly what the previous instructions produced. A service wrapper is
+// required until the agent speaks SCM natively.
+// windowsConfigPath is where scripts/install-agent.ps1 writes agent.yaml.
+const windowsConfigPath = `C:\ProgramData\nat-backup\agent.yaml`
+
 func installWindows(exePath string) error {
-	fmt.Printf("To install as Windows Service, run as Administrator:\n")
-	fmt.Printf("  sc create nat-backup-agent binPath= \"%s agent.yaml\" start= auto\n", exePath)
-	fmt.Printf("  sc start nat-backup-agent\n")
+	fmt.Printf(`The agent does not implement the Windows Service Control Manager protocol,
+so it cannot be registered directly with "sc create" (the service would fail to
+start with error 1053). Run it under a service wrapper instead, as Administrator:
+
+  NSSM:   nssm install nat-backup-agent "%s" "%s"
+          nssm start nat-backup-agent
+
+  WinSW:  create a WinSW XML pointing at %s and install it.
+
+Alternatively, run it as a scheduled task at startup, or in the foreground with:
+  %s %s
+`, exePath, windowsConfigPath, exePath, exePath, windowsConfigPath)
 	return nil
 }
