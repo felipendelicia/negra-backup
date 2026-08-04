@@ -38,6 +38,11 @@ func main() {
 			}
 			fmt.Println("agent installed as system service")
 			return
+		case "restore":
+			if err := runRestore(os.Args[2:]); err != nil {
+				log.Fatalf("restore failed: %v", err)
+			}
+			return
 		}
 	}
 

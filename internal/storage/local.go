@@ -74,6 +74,18 @@ func (b *LocalBackend) Upload(filename string, r io.Reader, _ int64) error {
 	return nil
 }
 
+func (b *LocalBackend) Download(filename string) (io.ReadCloser, error) {
+	srcPath, err := b.resolve(filename)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", srcPath, err)
+	}
+	return f, nil
+}
+
 func (b *LocalBackend) Delete(filename string) error {
 	destPath, err := b.resolve(filename)
 	if err != nil {

@@ -88,8 +88,16 @@ export default function Console() {
     try {
       ws = new WebSocket(url)
     } catch (err) {
-      setStatus(`Could not open the log stream: ${String(err)}`)
-      scheduleRetry()
+      // Constructing the socket only throws on a malformed URL. Report it on a
+      // later tick so connect() never updates state synchronously — it is
+      // called from an effect, and a sync setState there cascades renders.
+      const message = String(err)
+      clearRetry()
+      retryRef.current = window.setTimeout(() => {
+        retryRef.current = null
+        setStatus(`Could not open the log stream: ${message}`)
+        scheduleRetry()
+      }, 0)
       return
     }
 
@@ -203,6 +211,10 @@ export default function Console() {
     authStopRef.current = false
     attemptRef.current = 0
     clearRetry()
+    // Drop any socket still hanging around so we never run two at once.
+    const stale = wsRef.current
+    wsRef.current = null
+    stale?.close()
     setAuthExpired(false)
     setStatus('')
     connect()

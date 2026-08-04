@@ -1,3 +1,23 @@
 # nat-backup agent configuration
+#
+# Copy this file, fill in both fields and pass it to the agent:
+#   nat-backup-agent /path/to/agent.yaml
+# With no argument the agent reads ./agent.yaml.
+#
+# The installers write it for you:
+#   Linux:   /etc/nat-backup/agent.yaml                  (mode 0600, root-owned)
+#   Windows: %ProgramData%\nat-backup\agent.yaml         (SYSTEM + Administrators)
+#
+# These are the only two keys the agent parses (cmd/agent/internal/config.go).
+# Both are required; the agent exits at startup if either is empty.
+
+# Base URL of the nat-backup server, including the scheme and port.
+# Use http:// or https:// — the agent derives the WebSocket URL itself
+# (http -> ws, https -> wss) and connects to <server_url>/ws/agent.
 server_url: https://my-nat-backup-server.com
+
+# API key handed out once when the agent is created in the web UI
+# (Agents -> New agent). The server stores only its bcrypt hash, so a lost key
+# cannot be recovered — create a new agent instead.
+# This file grants access to the server: keep it readable only by root/SYSTEM.
 api_key: your-api-key-here

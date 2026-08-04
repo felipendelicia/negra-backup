@@ -150,6 +150,34 @@ func (b *SFTPBackend) Upload(filename string, r io.Reader, size int64) error {
 	return nil
 }
 
+// sftpReadCloser keeps the ssh/sftp connection alive for as long as the caller is
+// reading, and tears it down on Close.
+type sftpReadCloser struct {
+	io.ReadCloser
+	cleanup func()
+}
+
+func (r *sftpReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.cleanup()
+	return err
+}
+
+func (b *SFTPBackend) Download(filename string) (io.ReadCloser, error) {
+	client, cleanup, err := b.connect()
+	if err != nil {
+		return nil, err
+	}
+
+	remotePath := path.Join(b.cfg.Path, filename)
+	f, err := client.Open(remotePath)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("sftp open %s: %w", remotePath, err)
+	}
+	return &sftpReadCloser{ReadCloser: f, cleanup: cleanup}, nil
+}
+
 func (b *SFTPBackend) Delete(filename string) error {
 	client, cleanup, err := b.connect()
 	if err != nil {

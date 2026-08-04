@@ -80,7 +80,10 @@ export default function Login() {
             </div>
 
             {error && (
-              <p className="text-xs text-destructive bg-destructive/8 border border-destructive/20 rounded px-3 py-2">
+              <p
+                role="alert"
+                className="text-xs text-destructive bg-destructive/8 border border-destructive/20 rounded px-3 py-2"
+              >
                 {error}
               </p>
             )}
@@ -89,6 +92,7 @@ export default function Login() {
               type="submit"
               className="w-full font-semibold uppercase tracking-wider text-xs h-10"
               disabled={loading}
+              aria-busy={loading}
             >
               {loading ? 'Signing in…' : 'Sign in'}
             </Button>

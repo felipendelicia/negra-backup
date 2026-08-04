@@ -51,6 +51,19 @@ func (b *S3Backend) key(filename string) string {
 	return path.Join(prefix, filename)
 }
 
+func (b *S3Backend) Download(filename string) (io.ReadCloser, error) {
+	key := b.key(filename)
+
+	out, err := b.client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(b.cfg.Bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("s3 get object %s: %w", key, err)
+	}
+	return out.Body, nil
+}
+
 func (b *S3Backend) Delete(filename string) error {
 	_, err := b.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: aws.String(b.cfg.Bucket),

@@ -17,12 +17,21 @@ const contextKeyAgentID contextKey = "agent_id"
 
 func (s *Server) jwtAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
+		// Browsers cannot set headers on a WebSocket handshake, so the socket
+		// endpoints fall back to ?token=. Without this the live run-log stream was
+		// unreachable from the UI: it always answered 401 and the client swallowed
+		// it. Only accept the query form on the WebSocket routes, so ordinary API
+		// calls cannot leak a token through URLs.
+		var tokenStr string
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			tokenStr = strings.TrimPrefix(auth, "Bearer ")
+		} else if isWebSocketRoute(r) {
+			tokenStr = r.URL.Query().Get("token")
+		}
+		if tokenStr == "" {
 			respondError(w, http.StatusUnauthorized, "missing token")
 			return
 		}
-		tokenStr := strings.TrimPrefix(auth, "Bearer ")
 		token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, jwt.ErrSignatureInvalid
@@ -84,4 +93,14 @@ func (s *Server) agentAuthMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), contextKeyAgentID, agentID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// isWebSocketRoute reports whether the request is an upgrade to one of the
+// WebSocket endpoints, which authenticate via ?token= because browsers cannot
+// attach an Authorization header to a handshake.
+func isWebSocketRoute(r *http.Request) bool {
+	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return false
+	}
+	return strings.HasSuffix(r.URL.Path, "/logs/ws")
 }

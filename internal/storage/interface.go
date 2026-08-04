@@ -11,6 +11,10 @@ import (
 // Backend is the interface all storage backends implement.
 type Backend interface {
 	Upload(filename string, r io.Reader, size int64) error
+	// Download opens a previously uploaded backup for reading. A backup that cannot
+	// be read back is not a backup, so every backend must implement this. The caller
+	// owns the returned reader and must close it.
+	Download(filename string) (io.ReadCloser, error)
 	// Delete removes a previously uploaded backup. Deleting something that is
 	// already gone must succeed, so retention stays idempotent across retries.
 	Delete(filename string) error

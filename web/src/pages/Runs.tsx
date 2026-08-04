@@ -139,8 +139,17 @@ function useLiveLogs(run: BackupRun | null) {
 
   const active = live.runId === runId ? live : emptyLive
 
+  // Memoised so the identity only changes when the content does — consumers
+  // scroll on `logs` changing.
+  const logs = useMemo(
+    // Once the run ends, keep whatever we streamed and append the summary
+    // instead of discarding the live output.
+    () => (isRunning ? active.lines : [...active.lines, ...summary]),
+    [isRunning, active.lines, summary]
+  )
+
   return {
-    logs: isRunning ? active.lines : summary,
+    logs,
     connected: isRunning && active.connected,
     error: isRunning ? active.error : '',
   }

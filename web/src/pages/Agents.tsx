@@ -237,7 +237,8 @@ export default function Agents() {
                       )}
                       onClick={() => updateMut.mutate(agent.id)}
                       disabled={isUpdating || justSent}
-                      title="Descargar último release y reiniciar agente"
+                      title="Download latest release and restart agent"
+                      aria-label="Download latest release and restart agent"
                     >
                       <RefreshCw className={cn('h-3.5 w-3.5', isUpdating && 'animate-spin')} />
                       {justSent ? 'Actualizando…' : 'Update'}
