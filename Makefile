@@ -1,4 +1,5 @@
 .PHONY: build build-server build-agent build-agent-windows build-ui build-ui-ci embed-ui build-full \
+        build-tools build-rotate-key build-recovery-kit \
         test test-short test-race cover lint fmt fmt-check vet migrate-up dev-up dev-down clean
 
 SERVER_BIN=bin/nat-backup-server
@@ -13,7 +14,19 @@ GO_DIRS := ./cmd ./internal ./migrations
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
-build: build-server build-agent
+build: build-server build-agent build-tools
+
+# The operational tools are part of the product, not scripts: rotate-key is how a
+# leaked ENCRYPTION_KEY gets replaced, and recovery-kit is what makes the backups
+# recoverable if the server's database is lost. Building them by default means they
+# exist before the day someone needs them.
+build-tools: build-rotate-key build-recovery-kit
+
+build-rotate-key:
+	go build $(LDFLAGS) -o bin/rotate-key ./cmd/rotate-key
+
+build-recovery-kit:
+	go build $(LDFLAGS) -o bin/recovery-kit ./cmd/recovery-kit
 
 build-server:
 	go build $(LDFLAGS) -o $(SERVER_BIN) ./cmd/server
