@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -54,17 +53,21 @@ func main() {
 
 	agent := &Agent{cfg: cfg, runCtxs: make(map[string]context.CancelFunc)}
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	// The signal is wired to a context so it interrupts a live connection too.
+	// Checking a channel only between reconnects meant SIGTERM was ignored for as
+	// long as the read loop was blocked, which is essentially always — so service
+	// restarts had to escalate to SIGKILL, killing in-flight backups.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	for {
 		log.Printf("connecting to %s...", cfg.ServerURL)
-		if err := agent.connect(); err != nil {
+		if err := agent.connect(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("connection error: %v — retrying in 10s", err)
 		}
 
 		select {
-		case <-quit:
+		case <-ctx.Done():
 			fmt.Println("agent stopped")
 			return
 		case <-time.After(10 * time.Second):
@@ -90,7 +93,7 @@ func (a *Agent) writeJSON(v any) error {
 	return a.conn.WriteJSON(v)
 }
 
-func (a *Agent) connect() error {
+func (a *Agent) connect(parent context.Context) error {
 	wsServerURL := toWSURL(a.cfg.ServerURL)
 	conn, _, err := websocket.DefaultDialer.Dial(wsServerURL+"/ws/agent", nil)
 	if err != nil {
@@ -126,8 +129,15 @@ func (a *Agent) connect() error {
 	log.SetOutput(io.MultiWriter(os.Stderr, &wsLogWriter{agent: a}))
 
 	// Heartbeat goroutine — exits when ctx is cancelled (connect returns)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+
+	// Shutdown must interrupt the blocking ReadMessage below, so close the socket
+	// as soon as the parent context is done.
+	go func() {
+		<-ctx.Done()
+		conn.Close()
+	}()
 
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -207,7 +217,21 @@ func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJ
 
 	var err error
 	var result backup.BackupResult
-	var buf bytes.Buffer
+
+	// The archive is staged on disk, not in a bytes.Buffer. Buffering the whole
+	// tar+compress+encrypt output in memory meant a backup larger than the host's
+	// RAM killed the agent with an OOM, leaving the run stuck in 'running' and no
+	// file uploaded — and bytes.Buffer doubles its capacity as it grows, so the
+	// peak was worse than the archive size.
+	archive, err := os.CreateTemp("", "nat-backup-archive-*")
+	if err != nil {
+		a.sendFailure(runID, "temp archive: "+err.Error())
+		return
+	}
+	defer func() {
+		archive.Close()
+		os.Remove(archive.Name())
+	}()
 
 	switch job.Type {
 	case models.JobTypeFiles:
@@ -234,7 +258,7 @@ func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJ
 				})
 			},
 		}
-		result, err = backup.BackupFiles(cfg, &buf)
+		result, err = backup.BackupFiles(cfg, archive)
 		if err == nil && ctx.Err() != nil {
 			a.sendFailure(runID, "cancelled")
 			return
@@ -277,7 +301,7 @@ func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJ
 			Compression: job.Compression,
 			Encrypt:     job.Encrypt,
 			Passphrase:  passphrase,
-		}, &buf)
+		}, archive)
 
 	default:
 		a.sendFailure(runID, "unsupported job type: "+job.Type)
@@ -315,7 +339,22 @@ func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJ
 		return
 	}
 
-	if err := backend.Upload(filename, &buf, int64(buf.Len())); err != nil {
+	// Flush and rewind before streaming the staged archive to the backend.
+	if err := archive.Sync(); err != nil {
+		a.sendFailure(runID, "flush archive: "+err.Error())
+		return
+	}
+	stat, err := archive.Stat()
+	if err != nil {
+		a.sendFailure(runID, "stat archive: "+err.Error())
+		return
+	}
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		a.sendFailure(runID, "rewind archive: "+err.Error())
+		return
+	}
+
+	if err := backend.Upload(filename, archive, stat.Size()); err != nil {
 		a.sendFailure(runID, "upload: "+err.Error())
 		return
 	}
