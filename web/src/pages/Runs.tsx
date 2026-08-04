@@ -422,7 +422,9 @@ export default function Runs() {
     placeholderData: keepPreviousData,
   })
 
-  const runs = data?.runs ?? []
+  // Memoised because the per-run skip lookup keys off it: `?? []` would hand a
+  // fresh empty array to every render and refetch the whole page's logs with it.
+  const runs = useMemo(() => data?.runs ?? [], [data])
   const total = data?.total ?? 0
 
   const { data: jobs = [] } = useQuery({

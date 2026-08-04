@@ -151,13 +151,13 @@ function SourceFields({
     const excludeField = (
       <ExcludeField
         value={exclude}
-        onChange={patterns => {
-          // An empty list is dropped rather than sent as [], so the stored JSON
-          // of a job with no exclusions stays byte-identical to what it was
-          // before the field existed (the Go struct has `omitempty`).
-          const { exclude: _dropped, ...rest } = source
-          onChange(patterns.length > 0 ? { ...rest, exclude: patterns } : rest)
-        }}
+        onChange={patterns => onChange({
+          ...source,
+          // `undefined` rather than `[]`: JSON.stringify omits the key entirely,
+          // so a job with no exclusions serialises exactly as it did before this
+          // field existed — which is what the Go `omitempty` promises.
+          exclude: patterns.length > 0 ? patterns : undefined,
+        })}
       />
     )
 

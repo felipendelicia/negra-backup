@@ -267,10 +267,16 @@ func (s *Server) handleRunLogsWS(w http.ResponseWriter, r *http.Request) {
 	ch := s.hub.SubscribeRunLogs(id.String())
 	defer s.hub.UnsubscribeRunLogs(id.String(), ch)
 
-	// Check if run is already finished
+	// The run must exist, but it does not have to be running. This used to close the
+	// socket for any finished run, which made the stream useless for the one thing
+	// that happens after a run finishes: restoring from it. Restore progress is
+	// published on this run's channel, and only a successful — therefore finished —
+	// run can be restored, so refusing finished runs closed the only channel the
+	// restore had to report on.
 	var status string
-	if err := s.db.QueryRow(`SELECT status FROM backup_runs WHERE id=$1`, id).Scan(&status); err != nil || status != "running" {
-		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "run not active"))
+	if err := s.db.QueryRow(`SELECT status FROM backup_runs WHERE id=$1`, id).Scan(&status); err != nil {
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "run not found"))
 		return
 	}
 
