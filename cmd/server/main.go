@@ -3,8 +3,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -17,7 +15,6 @@ import (
 	"github.com/felipendelicia/nat-backup/internal/api"
 	"github.com/felipendelicia/nat-backup/internal/config"
 	"github.com/felipendelicia/nat-backup/internal/db"
-	"github.com/felipendelicia/nat-backup/internal/models"
 	"github.com/felipendelicia/nat-backup/internal/notify"
 	"github.com/felipendelicia/nat-backup/internal/scheduler"
 	"golang.org/x/crypto/bcrypt"
@@ -79,27 +76,14 @@ func main() {
 	// Tee log output to the browser console hub
 	log.SetOutput(io.MultiWriter(os.Stderr, srv.GetConsoleHub()))
 
-	// Wire email notifier if notification settings exist in DB.
-	var emailSender *notify.EmailSender
-	var nsRaw []byte
-	if err := pool.QueryRow(`SELECT config FROM notification_settings WHERE type='email' LIMIT 1`).Scan(&nsRaw); err != nil {
-		if err != sql.ErrNoRows {
-			log.Printf("loading notification settings: %v", err)
-		}
-	} else {
-		var emailCfg models.EmailNotificationConfig
-		if err := json.Unmarshal(nsRaw, &emailCfg); err != nil {
-			log.Printf("parsing notification settings: %v", err)
-		} else {
-			emailSender = notify.NewEmailSender(emailCfg)
-		}
-	}
-	if emailSender != nil {
-		agentHandler.SetFailureNotifier(emailSender)
-	}
+	// The notifier reads its configuration per alert rather than being frozen with
+	// whatever was in the database at boot. Snapshotting it here meant a fresh
+	// install never sent anything and UI changes needed a restart to take effect.
+	notifier := notify.NewDBNotifier(pool)
+	agentHandler.SetFailureNotifier(notifier)
 
 	// Start daily retention cleanup.
-	retention := notify.NewRetentionCleaner(pool, emailSender, cfg.EncryptionKey)
+	retention := notify.NewRetentionCleaner(pool, cfg.EncryptionKey)
 	retention.StartDailySchedule()
 
 	sched := scheduler.New(pool, hub, cfg.EncryptionKey)

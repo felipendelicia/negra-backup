@@ -19,12 +19,11 @@ var errLocalDestinationUnreachable = errors.New("local destination lives on the 
 
 type RetentionCleaner struct {
 	db     *sqlx.DB
-	sender *EmailSender
 	encKey string
 }
 
-func NewRetentionCleaner(db *sqlx.DB, sender *EmailSender, encKey string) *RetentionCleaner {
-	return &RetentionCleaner{db: db, sender: sender, encKey: encKey}
+func NewRetentionCleaner(db *sqlx.DB, encKey string) *RetentionCleaner {
+	return &RetentionCleaner{db: db, encKey: encKey}
 }
 
 // expiredRun is one row eligible for cleanup, joined with everything needed to

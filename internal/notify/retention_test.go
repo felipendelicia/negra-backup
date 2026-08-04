@@ -10,12 +10,12 @@ import (
 )
 
 func TestRetentionCleaner_New(t *testing.T) {
-	cleaner := NewRetentionCleaner(nil, nil, "")
+	cleaner := NewRetentionCleaner(nil, "")
 	assert.NotNil(t, cleaner)
 }
 
 func TestRetentionCleaner_RunNilDB(t *testing.T) {
-	cleaner := NewRetentionCleaner(nil, nil, "")
+	cleaner := NewRetentionCleaner(nil, "")
 	cleaner.Run() // Should not panic
 }
 
@@ -25,7 +25,7 @@ func strptr(s string) *string { return &s }
 // wrong is what turned backups into orphans: the row was deleted unconditionally
 // while the file was only ever logged as "would delete".
 func TestRetentionCleaner_DeleteArtifact(t *testing.T) {
-	rc := NewRetentionCleaner(nil, nil, "")
+	rc := NewRetentionCleaner(nil, "")
 
 	t.Run("run that never uploaded anything has nothing to delete", func(t *testing.T) {
 		require.NoError(t, rc.deleteArtifact(expiredRun{ID: "r1", StoragePath: nil}))
