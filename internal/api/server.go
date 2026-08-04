@@ -214,6 +214,7 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/jobs/{id}/run", s.handleTriggerJob)
 
 		r.Get("/api/runs", s.handleListRuns)
+		r.Get("/api/runs/stats", s.handleRunStats)
 		r.Post("/api/runs/{id}/cancel", s.handleCancelRun)
 		r.Get("/api/runs/{id}/logs", s.handleRunLogs)
 		r.Get("/api/runs/{id}/logs/ws", s.handleRunLogsWS)
