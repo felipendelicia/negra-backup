@@ -147,16 +147,22 @@ func (h *AgentHandler) handleAgentMessage(agentID string, msg AgentMessage) {
 
 	case MsgTypeJobDone:
 		if h.db != nil {
+			// NULLIF keeps the column NULL for agents that predate checksums rather
+			// than storing an empty string that looks like a computed value.
 			if _, err := h.db.Exec(`
 				UPDATE backup_runs SET
 				  status='success', finished_at=NOW(),
-				  size_bytes=$1, file_count=$2, storage_path=$3
-				WHERE id=$4`,
-				msg.SizeBytes, msg.FileCount, msg.StoragePath, msg.RunID); err != nil {
+				  size_bytes=$1, file_count=$2, storage_path=$3, checksum=NULLIF($4, '')
+				WHERE id=$5`,
+				msg.SizeBytes, msg.FileCount, msg.StoragePath, msg.Checksum, msg.RunID); err != nil {
 				log.Printf("db update run success %s: %v", msg.RunID, err)
 			}
 		}
-		h.recordRunLog(msg.RunID, "completed: "+msg.StoragePath)
+		line := "completed: " + msg.StoragePath
+		if msg.Checksum != "" {
+			line += " (sha256:" + msg.Checksum + ")"
+		}
+		h.recordRunLog(msg.RunID, line)
 
 	case MsgTypeJobFailed:
 		if h.db != nil {

@@ -67,8 +67,14 @@ type BackupJob struct {
 	Compression          string          `db:"compression"            json:"compression"`
 	Encrypt              bool            `db:"encrypt"                json:"encrypt"`
 	EncryptPassphrase    *string         `db:"encrypt_passphrase"     json:"-"`
-	CreatedAt            time.Time       `db:"created_at"             json:"created_at"`
-	UpdatedAt            time.Time       `db:"updated_at"             json:"updated_at"`
+	// RetryMax is how many extra attempts a failed run gets. 0 (the default) keeps
+	// the historical behaviour: one attempt, no retry.
+	RetryMax int `db:"retry_max" json:"retry_max"`
+	// RetryBackoffSeconds is the base delay before the first retry; it doubles with
+	// each further attempt. Only read when RetryMax > 0.
+	RetryBackoffSeconds int       `db:"retry_backoff_seconds"  json:"retry_backoff_seconds"`
+	CreatedAt           time.Time `db:"created_at"             json:"created_at"`
+	UpdatedAt           time.Time `db:"updated_at"             json:"updated_at"`
 }
 
 type BackupRun struct {
@@ -81,6 +87,11 @@ type BackupRun struct {
 	FileCount    *int       `db:"file_count"    json:"file_count"`
 	ErrorMessage *string    `db:"error_message" json:"error_message"`
 	StoragePath  *string    `db:"storage_path"  json:"storage_path"`
+	Checksum     *string    `db:"checksum"      json:"checksum"`
+	// Attempt is 1 for a first execution and counts up with each retry. 0 marks a
+	// row recorded without dispatching anything — an execution skipped because a
+	// previous run of the same job was still in progress.
+	Attempt int `db:"attempt" json:"attempt"`
 }
 
 type NotificationSettings struct {

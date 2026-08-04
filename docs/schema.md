@@ -10,14 +10,17 @@ Applied migrations:
 |------|--------|
 | `001_initial_schema.up.sql` | Creates the `uuid-ossp` extension, all six tables and four indexes |
 | `002_storage_config_text.up.sql` | `storage_destinations.config` **and** `notification_settings.config` JSONB → TEXT |
+| `004_job_retries.up.sql` | Retry policy on `backup_jobs`, attempt counter on `backup_runs`, and the partial unique index that allows one running run per job |
 
 This document mirrors the DDL. Every column below is taken from the migration
 files; the "written values" notes cite the Go code that produces them.
 
-> **No CHECK constraints exist anywhere in the schema.** Columns such as
-> `agents.status`, `backup_runs.status`, `backup_jobs.type` and
-> `backup_jobs.compression` are plain `TEXT`. The value sets listed below are what
-> the application actually writes, enforced only in Go — not by the database.
+> **The enum-like `TEXT` columns have no CHECK constraints.** `agents.status`,
+> `backup_runs.status`, `backup_jobs.type` and `backup_jobs.compression` are plain
+> `TEXT`; the value sets listed below are what the application writes, enforced only
+> in Go. Migration 004 added the first CHECK constraints in the schema, but they
+> cover numeric ranges (`retry_max`, `retry_backoff_seconds`, `attempt`), not these
+> columns.
 
 ---
 
@@ -93,8 +96,20 @@ Config shapes (plaintext, before encryption — field names are the json tags in
 | `compression` | TEXT | NOT NULL | `'zstd'` | `zstd` or `gzip` |
 | `encrypt` | BOOLEAN | NOT NULL | `false` | |
 | `encrypt_passphrase` | TEXT | NULL | — | AES-256-GCM ciphertext when set |
+| `retry_max` | INTEGER | NOT NULL | `0` | Migration 004. How many **retries** a failed run gets, so total attempts = `retry_max + 1`. `0` is the pre-004 behaviour: one attempt, no retry. `CHECK (retry_max BETWEEN 0 AND 10)` |
+| `retry_backoff_seconds` | INTEGER | NOT NULL | `300` | Migration 004. Base delay before the first retry; doubles per attempt (`base × 2^(attempt-1)`), with the exponent capped at 6 in `internal/scheduler`. Only read when `retry_max > 0`. `CHECK (retry_backoff_seconds BETWEEN 10 AND 86400)` |
 | `created_at` | TIMESTAMPTZ | NOT NULL | `NOW()` | |
 | `updated_at` | TIMESTAMPTZ | NOT NULL | `NOW()` | Set explicitly by the API on update; **no trigger** |
+
+Retry policy notes:
+
+* `POST /api/jobs` applies the conservative defaults (`0` / `300`) when the fields
+  are absent, so a job created without them behaves exactly as jobs did before 004.
+* `PUT /api/jobs/{id}` uses `COALESCE($n, retry_max)`: an absent field keeps the
+  stored value. The web UI does not send these fields, so editing a job through the
+  UI cannot silently wipe a policy configured through the API.
+* Both handlers reject out-of-range values with `400` before the database sees them
+  (`validateRetryPolicy` in `internal/api/jobs.go` mirrors the CHECK constraints).
 
 `schedule_cron` accepts standard 5-field cron (minute, hour, day-of-month, month,
 day-of-week) plus descriptors (`@hourly`, `@daily`, `@weekly`, `@monthly`,
@@ -129,18 +144,51 @@ Source shapes (JSONB, plaintext):
 | `file_count` | INTEGER | NULL | — | |
 | `error_message` | TEXT | NULL | — | |
 | `storage_path` | TEXT | NULL | — | Archive filename as written by the agent |
+| `attempt` | INTEGER | NOT NULL | `1` | Migration 004. `1` = first execution, `2` = first retry, and so on. `0` is reserved (see below). `CHECK (attempt >= 0)` |
 
 Values written to `status`:
 
 | Value | Written by |
 |-------|-----------|
-| `running` | `internal/scheduler/scheduler.go` and `internal/api/jobs.go` on INSERT |
+| `running` | `scheduler.BeginRun`, called from `internal/scheduler/scheduler.go` (cron and retries) and `internal/api/jobs.go` (`Run now`) |
 | `success` | `internal/ws/handler.go` on `job_done` |
-| `failed` | `internal/ws/handler.go` on `job_failed`, `internal/scheduler` (dispatch/setup failures) and `cmd/server/main.go` (stale runs at startup) |
+| `failed` | `internal/ws/handler.go` on `job_failed`, `internal/scheduler` (dispatch/setup failures and overlap skips) and `cmd/server/main.go` (stale runs at startup) |
 | `cancelled` | `internal/api/runs.go` on `POST /api/runs/{id}/cancel` |
 
 `cancelled` is terminal and sticky: `handleAgentMessage` skips the `failed` update
 when the row is already `cancelled`.
+
+Values written to `attempt`:
+
+| Value | Meaning |
+|-------|---------|
+| `0` | The execution was **skipped**, not attempted: a previous run of the job was still in progress. The row is stored `failed` with `error_message` starting `Skipped:` purely so the miss is visible; the retry scanner ignores it (`attempt >= 1`), because the run that caused the overlap is still going and will be retried on its own if it fails |
+| `1` | First execution — cron, `Run now`, or any row written before migration 004 |
+| `>= 2` | A retry. Capped by the job's `retry_max`: the scanner only picks rows where `attempt <= retry_max` |
+
+### Retry scheduling
+
+`internal/scheduler` polls for retryable runs every 30 s (`retryLoop` /
+`retryCandidateQuery`) instead of arming a `time.AfterFunc` per failure. The pending
+state **is** the failed row: one goroutine for the whole scheduler regardless of
+failure volume, and after a server restart the same query finds the same rows, so
+retries resume by themselves rather than dying with the process.
+
+A failed run is a candidate when all of the following hold:
+
+* `status = 'failed'` and `attempt BETWEEN 1 AND backup_jobs.retry_max`
+* the job is `enabled` and has `retry_max > 0`
+* `NOW() >= finished_at + retry_backoff_seconds × 2^min(attempt-1, 6)` seconds
+* that delay elapsed **less than one hour ago** — past this grace window the failure
+  stands, so a server that was down for two days does not come back and dispatch
+  every retry that came due while it was off
+* no newer run of the same job exists, ordered by `(started_at, id)`. This is what
+  makes repeated scans idempotent: once a retry row is created, the run it came from
+  stops being a candidate
+
+Retries are dispatched through the same `triggerJob` → `BeginRun` path as everything
+else, so they are subject to the overlap guard below and can never start a second
+concurrent run.
 
 ---
 
@@ -260,6 +308,43 @@ is verified. Keys issued earlier have `api_key_id IS NULL` and still authenticat
 through the scan, which is now restricted to those rows; regenerating an agent's key
 moves it onto the indexed path.
 
+### Indexes added by migration 004
+
+| Index | Why |
+|-------|-----|
+| `backup_runs(job_id)` UNIQUE, partial `WHERE status = 'running'` | The **overlap guard**: at most one run of a job may be `running` at any moment |
+| `backup_runs(finished_at)` partial `WHERE status = 'failed'` | The retry scanner runs every 30 s and filters on exactly this; without it each tick walked every historical failure |
+
+#### Why the overlap guard is an index and not a query
+
+Nothing previously stopped two runs of the same job from executing at once — a daily
+backup that takes more than a day, or `Run now` clicked while the cron had already
+fired, produced two agents writing to the same destination.
+
+`scheduler.BeginRun` inserts with `INSERT ... SELECT ... WHERE NOT EXISTS (... status
+= 'running')`, but **that clause is not the guard**. Under `READ COMMITTED` each
+statement reads the snapshot taken when it began, so every concurrent inserter that
+starts before the winner commits still sees "nothing running" and inserts too.
+Measured against this database with the index dropped, 16 simultaneous callers let
+2–5 runs through in 198 of 200 rounds. The `WHERE NOT EXISTS` clause is kept only
+because it makes the uncontended case cheap and returns a clean `sql.ErrNoRows`
+instead of an error to classify.
+
+The partial unique index is what actually enforces the invariant: it is checked by
+the storage engine at insert time, so the second writer blocks until the first commits
+and then fails with `23505`, whichever process or server it came from. `BeginRun`
+maps both outcomes to `scheduler.ErrRunOverlap`, which `internal/api/jobs.go` surfaces
+as **409** on `POST /api/jobs/{id}/trigger`.
+
+A mutex in the scheduler was rejected for the same reason: it dies with the process,
+so a run still in flight after a restart would no longer be protected, and two servers
+against one database never would be.
+
+Migration 004 closes any pre-existing duplicate `running` rows (keeping the most
+recent per job, ordered by `(started_at, id)`) before creating the index, since
+otherwise the index would fail to build on a live database. `004_job_retries.down.sql`
+deliberately does **not** reopen them.
+
 ---
 
 ## Known discrepancies
@@ -283,3 +368,15 @@ scope for this document.
 4. **`backup_jobs.source` holds secrets in plaintext** — database connection
    strings, including their passwords. Unlike storage configs and backup
    passphrases, it is neither encrypted nor redacted by the API.
+5. **The retry policy has no UI.** `retry_max` and `retry_backoff_seconds` are
+   readable and writable through `GET`/`POST`/`PUT /api/jobs`, but the web UI does
+   not render or send them, so every job stays at the default of 0 retries until
+   someone sets the policy over the API. The `COALESCE` on update exists precisely
+   so a UI edit does not reset a policy set that way.
+6. **Overlap skips are recorded as `failed` runs.** A skipped execution writes a
+   terminal row with `attempt = 0` and an error message starting `Skipped:`, which is
+   what makes an unachievable schedule visible in the Runs list. A job whose runs
+   routinely outlast their interval will therefore accumulate one such row per
+   missed tick until retention sweeps them. A dedicated `skipped` status would read
+   better, but the UI renders `backup_runs.status` directly and does not know that
+   value.

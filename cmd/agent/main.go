@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -237,6 +239,11 @@ func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJ
 		os.Remove(archive.Name())
 	}()
 
+	// Hash while writing rather than re-reading the file afterwards: the archive can
+	// be hundreds of gigabytes, and a second pass would double the I/O.
+	hasher := sha256.New()
+	archiveW := io.MultiWriter(archive, hasher)
+
 	switch job.Type {
 	case models.JobTypeFiles:
 		var src models.FilesSource
@@ -262,7 +269,7 @@ func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJ
 				})
 			},
 		}
-		result, err = backup.BackupFiles(cfg, archive)
+		result, err = backup.BackupFiles(cfg, archiveW)
 		if err == nil && ctx.Err() != nil {
 			a.sendFailure(runID, "cancelled")
 			return
@@ -321,7 +328,7 @@ func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJ
 					CurrentFile: file,
 				})
 			},
-		}, archive)
+		}, archiveW)
 
 	default:
 		a.sendFailure(runID, "unsupported job type: "+job.Type)
@@ -386,6 +393,7 @@ func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJ
 		SizeBytes:   result.SizeBytes,
 		FileCount:   result.FileCount,
 		StoragePath: filename,
+		Checksum:    hex.EncodeToString(hasher.Sum(nil)),
 	}); err != nil {
 		log.Printf("send job_done: %v", err)
 	}

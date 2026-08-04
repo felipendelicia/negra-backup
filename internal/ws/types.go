@@ -40,6 +40,10 @@ type AgentMessage struct {
 	CurrentFile string `json:"current_file,omitempty"`
 	Status      string `json:"status,omitempty"`
 	SizeBytes   int64  `json:"size_bytes,omitempty"`
+	// Checksum is the SHA-256 of the archive the agent uploaded, so a truncated
+	// transfer can be told apart from a good one instead of being recorded as a
+	// successful backup.
+	Checksum    string `json:"checksum,omitempty"`
 	StoragePath string `json:"storage_path,omitempty"`
 	FileCount   int    `json:"file_count,omitempty"`
 	Error       string `json:"error,omitempty"`

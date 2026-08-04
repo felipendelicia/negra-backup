@@ -3,6 +3,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -29,13 +31,44 @@ type createJobRequest struct {
 	// is distinguishable from an explicit empty string ("clear it"). On update,
 	// a nil value leaves the stored passphrase untouched.
 	EncryptPassphrase *string `json:"encrypt_passphrase,omitempty"`
+	// Retry policy. Pointers for the same reason as the passphrase: a client that
+	// does not know about these fields yet (the current UI does not send them) must
+	// not silently reset a policy set through the API. Absent means "the default" on
+	// create and "keep what is stored" on update.
+	RetryMax            *int `json:"retry_max,omitempty"`
+	RetryBackoffSeconds *int `json:"retry_backoff_seconds,omitempty"`
+}
+
+// Retry policy bounds. They mirror the CHECK constraints added by migration 004 so a
+// bad value comes back as a 400 instead of a 500 from the database driver.
+const (
+	defaultRetryMax            = 0
+	defaultRetryBackoffSeconds = 300
+	maxRetryMax                = 10
+	minRetryBackoffSeconds     = 10
+	maxRetryBackoffSeconds     = 86400
+)
+
+// validateRetryPolicy checks the fields the request actually set. Nil is always
+// valid: the caller decides whether nil means "default" or "keep stored".
+func validateRetryPolicy(req *createJobRequest) error {
+	if req.RetryMax != nil && (*req.RetryMax < 0 || *req.RetryMax > maxRetryMax) {
+		return fmt.Errorf("retry_max must be between 0 and %d", maxRetryMax)
+	}
+	if req.RetryBackoffSeconds != nil &&
+		(*req.RetryBackoffSeconds < minRetryBackoffSeconds || *req.RetryBackoffSeconds > maxRetryBackoffSeconds) {
+		return fmt.Errorf("retry_backoff_seconds must be between %d and %d",
+			minRetryBackoffSeconds, maxRetryBackoffSeconds)
+	}
+	return nil
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	jobs := []models.BackupJob{}
 	if err := s.db.Select(&jobs, `
 		SELECT id, agent_id, name, enabled, type, source, storage_destination_id,
-		       schedule_cron, retention_days, compression, encrypt, created_at, updated_at
+		       schedule_cron, retention_days, compression, encrypt,
+		       retry_max, retry_backoff_seconds, created_at, updated_at
 		FROM backup_jobs ORDER BY created_at DESC`); err != nil {
 		log.Printf("handleListJobs: %v", err)
 		respondError(w, http.StatusInternalServerError, "internal server error")
@@ -64,6 +97,20 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	if req.RetentionDays <= 0 {
 		req.RetentionDays = 30
 	}
+	if err := validateRetryPolicy(&req); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Conservative defaults: a job created without a retry policy behaves exactly as
+	// jobs did before migration 004 — one attempt, no retry.
+	retryMax := defaultRetryMax
+	if req.RetryMax != nil {
+		retryMax = *req.RetryMax
+	}
+	retryBackoff := defaultRetryBackoffSeconds
+	if req.RetryBackoffSeconds != nil {
+		retryBackoff = *req.RetryBackoffSeconds
+	}
 	// An encrypted job without a passphrase would produce plaintext archives named
 	// ".enc", so refuse it here rather than degrade silently downstream.
 	if req.Encrypt && (req.EncryptPassphrase == nil || *req.EncryptPassphrase == "") {
@@ -83,13 +130,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	var job models.BackupJob
 	err := s.db.QueryRowx(`
 		INSERT INTO backup_jobs
-		  (agent_id, name, enabled, type, source, storage_destination_id, schedule_cron, retention_days, compression, encrypt, encrypt_passphrase)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		  (agent_id, name, enabled, type, source, storage_destination_id, schedule_cron, retention_days, compression, encrypt, encrypt_passphrase, retry_max, retry_backoff_seconds)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		RETURNING id, agent_id, name, enabled, type, source, storage_destination_id,
-		          schedule_cron, retention_days, compression, encrypt, created_at, updated_at`,
+		          schedule_cron, retention_days, compression, encrypt,
+		          retry_max, retry_backoff_seconds, created_at, updated_at`,
 		req.AgentID, req.Name, req.Enabled, req.Type, req.Source,
 		req.StorageDestinationID, req.ScheduleCron, req.RetentionDays,
-		req.Compression, req.Encrypt, encPassphrase,
+		req.Compression, req.Encrypt, encPassphrase, retryMax, retryBackoff,
 	).StructScan(&job)
 	if err != nil {
 		log.Printf("handleCreateJob: %v", err)
@@ -122,6 +170,10 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 	if req.RetentionDays <= 0 {
 		req.RetentionDays = 30
 	}
+	if err := validateRetryPolicy(&req); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// A nil passphrase means "keep the stored one". Enabling encryption on a job
 	// that has none stored must be rejected, otherwise the job would dispatch with
@@ -149,18 +201,23 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 		encPassphrase = &enc
 	}
 	// COALESCE keeps the stored passphrase when the request omits it; disabling
-	// encryption clears it outright.
+	// encryption clears it outright. The retry columns use the same trick: the UI
+	// does not send them yet, and an edit through the UI must not silently wipe a
+	// policy configured through the API.
 	result, err := s.db.Exec(`
 		UPDATE backup_jobs SET
 		  agent_id=$1, name=$2, enabled=$3, type=$4, source=$5,
 		  storage_destination_id=$6, schedule_cron=$7, retention_days=$8,
 		  compression=$9, encrypt=$10,
 		  encrypt_passphrase=CASE WHEN $10 THEN COALESCE($11, encrypt_passphrase) ELSE NULL END,
-		  updated_at=$12
-		WHERE id=$13`,
+		  retry_max=COALESCE($12, retry_max),
+		  retry_backoff_seconds=COALESCE($13, retry_backoff_seconds),
+		  updated_at=$14
+		WHERE id=$15`,
 		req.AgentID, req.Name, req.Enabled, req.Type, req.Source,
 		req.StorageDestinationID, req.ScheduleCron, req.RetentionDays,
-		req.Compression, req.Encrypt, encPassphrase, time.Now(), id,
+		req.Compression, req.Encrypt, encPassphrase,
+		req.RetryMax, req.RetryBackoffSeconds, time.Now(), id,
 	)
 	if err != nil {
 		log.Printf("handleUpdateJob: %v", err)
@@ -297,11 +354,17 @@ func (s *Server) handleTriggerJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var run models.BackupRun
-	if err := s.db.QueryRowx(
-		`INSERT INTO backup_runs (job_id, status) VALUES ($1, 'running') RETURNING id, job_id, started_at, status`,
-		id,
-	).StructScan(&run); err != nil {
+	// Overlap guard. "Run now" while the cron has already fired (or while a previous
+	// run is simply taking longer than its interval) used to start a second backup of
+	// the same job writing to the same destination. scheduler.BeginRun claims the
+	// job's single running slot atomically, so exactly one of the racing callers
+	// wins — including across the cron path and this one.
+	run, err := scheduler.BeginRun(s.db, id, scheduler.AttemptFirst)
+	if errors.Is(err, scheduler.ErrRunOverlap) {
+		respondError(w, http.StatusConflict, scheduler.ErrRunOverlap.Error())
+		return
+	}
+	if err != nil {
 		log.Printf("handleTriggerJob: %v", err)
 		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
