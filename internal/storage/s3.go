@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/felipendelicia/nat-backup/internal/models"
 )
@@ -75,17 +76,40 @@ func (b *S3Backend) Delete(filename string) error {
 	return nil
 }
 
+// The SDK marks feature/s3/manager as superseded by feature/s3/transfermanager, but
+// that package is still v0.x. Moving a backup system's upload path onto an unstable
+// API is a worse trade than staying on a deprecated but stable v1 one; revisit when
+// transfermanager reaches v1.
+
+// s3PartSize is the multipart chunk size. S3 allows at most 10,000 parts, so 64 MiB
+// puts the ceiling at ~640 GiB per archive while keeping the memory held per
+// concurrent part reasonable.
+const s3PartSize = 64 * 1024 * 1024
+
+// s3Concurrency is how many parts upload at once. Each in-flight part holds
+// s3PartSize in memory, so this caps the uploader at ~192 MiB.
+const s3Concurrency = 3
+
 func (b *S3Backend) Upload(filename string, r io.Reader, size int64) error {
 	key := b.key(filename)
 
-	_, err := b.client.PutObject(context.Background(), &s3.PutObjectInput{
-		Bucket:        aws.String(b.cfg.Bucket),
-		Key:           aws.String(key),
-		Body:          r,
-		ContentLength: aws.Int64(size),
+	// A single PutObject caps out at 5 GiB, which silently made S3 unusable for any
+	// backup bigger than that — the exact case this product exists for. The manager
+	// splits the stream into parts, uploads them concurrently, retries individual
+	// parts, and aborts the multipart upload on failure so no partial object is left
+	// behind and billed. It also takes an io.Reader without a known length, so the
+	// size argument is advisory here.
+	uploader := manager.NewUploader(b.client, func(u *manager.Uploader) {
+		u.PartSize = s3PartSize
+		u.Concurrency = s3Concurrency
 	})
-	if err != nil {
-		return fmt.Errorf("s3 put object: %w", err)
+
+	if _, err := uploader.Upload(context.Background(), &s3.PutObjectInput{
+		Bucket: aws.String(b.cfg.Bucket),
+		Key:    aws.String(key),
+		Body:   r,
+	}); err != nil {
+		return fmt.Errorf("s3 upload %s: %w", key, err)
 	}
 
 	return nil
