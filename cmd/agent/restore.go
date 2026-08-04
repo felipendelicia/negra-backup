@@ -12,6 +12,7 @@ import (
 
 	"github.com/felipendelicia/nat-backup/internal/backup"
 	"github.com/felipendelicia/nat-backup/internal/storage"
+	"golang.org/x/term"
 )
 
 // passphraseEnvVar is the preferred way to supply a passphrase non-interactively:
@@ -42,8 +43,7 @@ Flags:
   --dry-run                  List what would be restored without writing anything.
 
 Passphrase resolution order: --passphrase, then $%s, then an
-interactive prompt. NOTE: the prompt echoes what you type, so on a shared screen use
-the environment variable instead.
+interactive prompt (input is hidden when stdin is a terminal).
 
 Examples:
   nat-backup-agent restore --file backup.tar.zst.enc --dest /tmp/out --passphrase secret
@@ -212,17 +212,31 @@ func loadStorageSpec(v string) (storageSpec, error) {
 // resolvePassphrase reads the passphrase for an encrypted archive.
 //
 // The environment variable comes first because it keeps the secret out of the
-// process list. The interactive prompt echoes the input: turning the terminal echo
-// off needs golang.org/x/term, which is not a declared dependency of this module.
+// process list, where --passphrase would be visible to every user on the host.
 func resolvePassphrase() (string, error) {
 	if v := os.Getenv(passphraseEnvVar); v != "" {
 		return v, nil
 	}
 
-	fmt.Fprintf(os.Stderr,
-		"archive is encrypted. Enter passphrase (it will be visible; set %s to avoid this): ",
-		passphraseEnvVar)
+	fmt.Fprint(os.Stderr, "archive is encrypted. Enter passphrase: ")
 
+	// On a terminal, read with echo disabled so the passphrase that protects the
+	// backup is not left visible on screen or in a scrollback buffer.
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		raw, err := term.ReadPassword(fd)
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", fmt.Errorf("read passphrase: %w", err)
+		}
+		pass := strings.TrimRight(string(raw), "\r\n")
+		if pass == "" {
+			return "", fmt.Errorf("archive is encrypted: provide --passphrase or set %s", passphraseEnvVar)
+		}
+		return pass, nil
+	}
+
+	// Piped stdin: no echo to suppress.
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", fmt.Errorf("read passphrase: %w", err)
