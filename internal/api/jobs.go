@@ -9,6 +9,7 @@ import (
 
 	"github.com/felipendelicia/nat-backup/internal/crypto"
 	"github.com/felipendelicia/nat-backup/internal/models"
+	"github.com/felipendelicia/nat-backup/internal/scheduler"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -24,7 +25,10 @@ type createJobRequest struct {
 	RetentionDays        int             `json:"retention_days"`
 	Compression          string          `json:"compression"`
 	Encrypt              bool            `json:"encrypt"`
-	EncryptPassphrase    string          `json:"encrypt_passphrase,omitempty"`
+	// EncryptPassphrase is a pointer so an absent field ("keep the stored one")
+	// is distinguishable from an explicit empty string ("clear it"). On update,
+	// a nil value leaves the stored passphrase untouched.
+	EncryptPassphrase *string `json:"encrypt_passphrase,omitempty"`
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
@@ -50,16 +54,27 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "name, type, schedule_cron required")
 		return
 	}
+	if err := scheduler.ValidateCron(req.ScheduleCron); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid cron expression: "+err.Error())
+		return
+	}
 	if req.Compression == "" {
 		req.Compression = models.CompressionZstd
 	}
-	if req.RetentionDays == 0 {
+	if req.RetentionDays <= 0 {
 		req.RetentionDays = 30
 	}
+	// An encrypted job without a passphrase would produce plaintext archives named
+	// ".enc", so refuse it here rather than degrade silently downstream.
+	if req.Encrypt && (req.EncryptPassphrase == nil || *req.EncryptPassphrase == "") {
+		respondError(w, http.StatusBadRequest, "encrypt_passphrase is required when encrypt is enabled")
+		return
+	}
 	var encPassphrase *string
-	if req.Encrypt && req.EncryptPassphrase != "" {
-		enc, err := crypto.Encrypt(s.cfg.EncryptionKey, req.EncryptPassphrase)
+	if req.Encrypt {
+		enc, err := crypto.Encrypt(s.cfg.EncryptionKey, *req.EncryptPassphrase)
 		if err != nil {
+			log.Printf("handleCreateJob encrypt passphrase: %v", err)
 			respondError(w, http.StatusInternalServerError, "encryption failed")
 			return
 		}
@@ -100,20 +115,48 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
+	if err := scheduler.ValidateCron(req.ScheduleCron); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid cron expression: "+err.Error())
+		return
+	}
+	if req.RetentionDays <= 0 {
+		req.RetentionDays = 30
+	}
+
+	// A nil passphrase means "keep the stored one". Enabling encryption on a job
+	// that has none stored must be rejected, otherwise the job would dispatch with
+	// an empty passphrase and produce plaintext archives named ".enc".
+	var storedPassphrase *string
+	if err := s.db.Get(&storedPassphrase,
+		`SELECT encrypt_passphrase FROM backup_jobs WHERE id=$1`, id); err != nil {
+		log.Printf("handleUpdateJob load job %s: %v", id, err)
+		respondError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if req.Encrypt && (req.EncryptPassphrase == nil || *req.EncryptPassphrase == "") && storedPassphrase == nil {
+		respondError(w, http.StatusBadRequest, "encrypt_passphrase is required when enabling encryption")
+		return
+	}
+
 	var encPassphrase *string
-	if req.Encrypt && req.EncryptPassphrase != "" {
-		enc, err := crypto.Encrypt(s.cfg.EncryptionKey, req.EncryptPassphrase)
+	if req.Encrypt && req.EncryptPassphrase != nil && *req.EncryptPassphrase != "" {
+		enc, err := crypto.Encrypt(s.cfg.EncryptionKey, *req.EncryptPassphrase)
 		if err != nil {
+			log.Printf("handleUpdateJob encrypt passphrase: %v", err)
 			respondError(w, http.StatusInternalServerError, "encryption failed")
 			return
 		}
 		encPassphrase = &enc
 	}
+	// COALESCE keeps the stored passphrase when the request omits it; disabling
+	// encryption clears it outright.
 	result, err := s.db.Exec(`
 		UPDATE backup_jobs SET
 		  agent_id=$1, name=$2, enabled=$3, type=$4, source=$5,
 		  storage_destination_id=$6, schedule_cron=$7, retention_days=$8,
-		  compression=$9, encrypt=$10, encrypt_passphrase=$11, updated_at=$12
+		  compression=$9, encrypt=$10,
+		  encrypt_passphrase=CASE WHEN $10 THEN COALESCE($11, encrypt_passphrase) ELSE NULL END,
+		  updated_at=$12
 		WHERE id=$13`,
 		req.AgentID, req.Name, req.Enabled, req.Type, req.Source,
 		req.StorageDestinationID, req.ScheduleCron, req.RetentionDays,

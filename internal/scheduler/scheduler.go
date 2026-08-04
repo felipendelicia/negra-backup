@@ -28,7 +28,9 @@ type Scheduler struct {
 
 func New(db *sqlx.DB, dispatcher JobDispatcher, encKey string) *Scheduler {
 	return &Scheduler{
-		cron:       cron.New(),
+		// Without cron.Recover a panic inside a job kills the whole server: cron
+		// runs each job in a bare goroutine, where no HTTP middleware can catch it.
+		cron:       cron.New(cron.WithChain(cron.Recover(cron.DefaultLogger))),
 		db:         db,
 		dispatcher: dispatcher,
 		entryIDs:   make(map[string]cron.EntryID),

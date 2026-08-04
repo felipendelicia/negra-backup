@@ -30,12 +30,29 @@ function ConfigFields({
   function field(key: string, label: string, placeholder?: string, inputType?: string) {
     return (
       <div className="space-y-1" key={key}>
-        <Label>{label}</Label>
+        <Label htmlFor={`storage-${key}`}>{label}</Label>
         <Input
+          id={`storage-${key}`}
           type={inputType ?? 'text'}
           value={(config[key] as string) ?? ''}
           placeholder={placeholder}
           onChange={e => onChange({ ...config, [key]: e.target.value })}
+        />
+      </div>
+    )
+  }
+
+  // The Go model declares port as an int; sending the raw string from the input
+  // makes json.Unmarshal fail and aborts every SFTP upload.
+  function numberField(key: string, label: string, fallback: number) {
+    return (
+      <div className="space-y-1" key={key}>
+        <Label htmlFor={`storage-${key}`}>{label}</Label>
+        <Input
+          id={`storage-${key}`}
+          type="number"
+          value={(config[key] as number) ?? fallback}
+          onChange={e => onChange({ ...config, [key]: parseInt(e.target.value, 10) || fallback })}
         />
       </div>
     )
@@ -52,8 +69,8 @@ function ConfigFields({
         {field('region', 'Region', 'us-east-1')}
         {field('prefix', 'Key Prefix (optional)', 'backups/')}
         {field('endpoint', 'Endpoint URL (optional, for S3-compatible)', 'https://s3.example.com')}
-        {field('access_key_id', 'Access Key ID')}
-        {field('secret_access_key', 'Secret Access Key', undefined, 'password')}
+        {field('access_key', 'Access Key ID')}
+        {field('secret_key', 'Secret Access Key', undefined, 'password')}
       </>
     )
   }
@@ -62,9 +79,10 @@ function ConfigFields({
     return (
       <>
         {field('host', 'Host')}
-        {field('port', 'Port', '22')}
-        {field('username', 'Username')}
+        {numberField('port', 'Port', 22)}
+        {field('user', 'Username')}
         {field('password', 'Password', undefined, 'password')}
+        {field('private_key', 'Private Key (optional, PEM)', '-----BEGIN OPENSSH PRIVATE KEY-----')}
         {field('path', 'Remote Path', '/backups')}
       </>
     )

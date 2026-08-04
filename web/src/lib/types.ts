@@ -16,6 +16,33 @@ export interface StorageDestination {
   created_at: string
 }
 
+// Field names and types below must match the json tags of the Go structs in
+// internal/models/models.go exactly. Go silently discards unknown keys, so a
+// mismatch here produces a destination that saves fine and fails at upload time.
+export interface LocalStorageConfig {
+  path: string
+}
+
+export interface S3StorageConfig {
+  bucket: string
+  region: string
+  access_key: string
+  secret_key: string
+  endpoint?: string
+  prefix?: string
+}
+
+export interface SFTPStorageConfig {
+  host: string
+  port: number
+  user: string
+  path: string
+  password?: string
+  private_key?: string
+}
+
+export type StorageConfig = LocalStorageConfig | S3StorageConfig | SFTPStorageConfig
+
 export interface BackupJob {
   id: string
   agent_id: string
@@ -37,7 +64,7 @@ export interface BackupRun {
   job_id: string
   started_at: string
   finished_at: string | null
-  status: 'running' | 'success' | 'failed'
+  status: 'running' | 'success' | 'failed' | 'cancelled'
   size_bytes: number | null
   file_count: number | null
   error_message: string | null
@@ -77,5 +104,5 @@ export interface CreateJobRequest {
 export interface CreateStorageRequest {
   name: string
   type: StorageDestination['type']
-  config: Record<string, unknown>
+  config: Partial<LocalStorageConfig & S3StorageConfig & SFTPStorageConfig>
 }

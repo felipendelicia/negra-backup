@@ -14,10 +14,23 @@ import (
 )
 
 // AgentConn holds the state for a single agent WebSocket connection.
+//
+// send is never closed. Closing it from the hub while another goroutine was in the
+// middle of a send panicked with "send on closed channel" and, because several of
+// those senders run in goroutines without a recover (the cron scheduler among them),
+// took the whole process down. Shutdown is signalled by closing done instead: senders
+// select on it, and the channel itself is left for the GC.
 type AgentConn struct {
-	conn    *websocket.Conn
-	agentID string
-	send    chan []byte
+	conn      *websocket.Conn
+	agentID   string
+	send      chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// close signals every sender that this connection is gone. Safe to call repeatedly.
+func (ac *AgentConn) close() {
+	ac.closeOnce.Do(func() { close(ac.done) })
 }
 
 // BrowseResponse carries the result of a browse_path request.
@@ -27,8 +40,8 @@ type BrowseResponse struct {
 }
 
 type Hub struct {
-	mu      sync.RWMutex
-	agents  map[string]*AgentConn
+	mu     sync.RWMutex
+	agents map[string]*AgentConn
 
 	logMu   sync.RWMutex
 	logSubs map[string][]chan string
@@ -70,7 +83,7 @@ func (h *Hub) Run() {
 		case ac := <-h.unregister:
 			h.mu.Lock()
 			if current, ok := h.agents[ac.agentID]; ok && current == ac {
-				close(current.send)
+				current.close()
 				delete(h.agents, ac.agentID)
 			}
 			h.mu.Unlock()
@@ -87,7 +100,12 @@ func (h *Hub) Run() {
 // Register adds an agent connection and returns the AgentConn handle.
 // Pass the returned handle to Unregister to avoid the reconnect race.
 func (h *Hub) Register(agentID string, conn *websocket.Conn) *AgentConn {
-	ac := &AgentConn{conn: conn, agentID: agentID, send: make(chan []byte, 64)}
+	ac := &AgentConn{
+		conn:    conn,
+		agentID: agentID,
+		send:    make(chan []byte, 64),
+		done:    make(chan struct{}),
+	}
 	h.register <- ac
 	if conn != nil {
 		go ac.writePump()
@@ -166,6 +184,8 @@ func (h *Hub) DispatchJob(agentID, runID string, job models.BackupJob, storageTy
 
 	select {
 	case ac.send <- data:
+	case <-ac.done:
+		log.Printf("dispatch: agent %s disconnected before dispatch", agentID)
 	default:
 		log.Printf("dispatch: agent %s send buffer full", agentID)
 	}
@@ -195,6 +215,8 @@ func (h *Hub) BrowsePath(agentID, requestID, path string) ([]BrowseEntry, error)
 	data, _ := json.Marshal(ServerMessage{Type: MsgTypeBrowsePath, RequestID: requestID, Path: path})
 	select {
 	case ac.send <- data:
+	case <-ac.done:
+		return nil, fmt.Errorf("agent disconnected")
 	default:
 		return nil, fmt.Errorf("agent send buffer full")
 	}
@@ -232,6 +254,8 @@ func (h *Hub) UpdateAgent(agentID string) bool {
 	select {
 	case ac.send <- data:
 		return true
+	case <-ac.done:
+		return false
 	default:
 		return false
 	}
@@ -254,18 +278,22 @@ func (h *Hub) CancelJob(agentID, runID string) bool {
 	select {
 	case ac.send <- data:
 		return true
+	case <-ac.done:
+		return false
 	default:
 		return false
 	}
 }
 
 func (h *Hub) BroadcastRunLog(runID, line string) {
+	// The fan-out runs under the read lock on purpose. Copying the subscribers and
+	// releasing the lock first left a window in which UnsubscribeRunLogs could close
+	// a channel that this loop was about to send on, panicking the process. The sends
+	// are non-blocking, so holding the lock here costs nothing.
 	h.logMu.RLock()
-	subs := make([]chan string, len(h.logSubs[runID]))
-	copy(subs, h.logSubs[runID])
-	h.logMu.RUnlock()
+	defer h.logMu.RUnlock()
 
-	for _, ch := range subs {
+	for _, ch := range h.logSubs[runID] {
 		select {
 		case ch <- line:
 		default:
@@ -305,11 +333,11 @@ func (ac *AgentConn) writePump() {
 	defer ac.conn.Close()
 	for {
 		select {
-		case msg, ok := <-ac.send:
-			if !ok {
-				ac.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
+		case <-ac.done:
+			ac.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			ac.conn.WriteMessage(websocket.CloseMessage, []byte{})
+			return
+		case msg := <-ac.send:
 			ac.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := ac.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return

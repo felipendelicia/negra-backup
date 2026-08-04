@@ -1,11 +1,15 @@
 package backup
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 )
+
+// ErrMissingPassphrase is returned when encryption is requested without a passphrase.
+var ErrMissingPassphrase = errors.New("encryption requested but passphrase is empty")
 
 // FilesConfig holds configuration for a file backup operation.
 type FilesConfig struct {
@@ -23,7 +27,15 @@ type BackupResult struct {
 }
 
 // BackupFiles compresses (and optionally encrypts) the given paths and writes to w.
+//
+// If cfg.Encrypt is set, cfg.Passphrase must be non-empty: a missing passphrase is
+// an error, never a silent fallback to plaintext. The caller names the output ".enc"
+// based on cfg.Encrypt alone, so degrading here would produce a plaintext archive
+// labelled as encrypted.
 func BackupFiles(cfg FilesConfig, w io.Writer) (BackupResult, error) {
+	if cfg.Encrypt && cfg.Passphrase == "" {
+		return BackupResult{}, ErrMissingPassphrase
+	}
 	if cfg.Compression == "" {
 		cfg.Compression = CompressionZstd
 	}
@@ -47,7 +59,7 @@ func BackupFiles(cfg FilesConfig, w io.Writer) (BackupResult, error) {
 	var totalBytes int64
 	var compErr error
 
-	if cfg.Encrypt && cfg.Passphrase != "" {
+	if cfg.Encrypt {
 		// Pipeline: TarCompress → pipe → EncryptStream → w
 		pr, pw := io.Pipe()
 		errCh := make(chan error, 1)

@@ -221,7 +221,14 @@ export default function Jobs() {
     if (!form.storage_destination_id) { setFormError('Select a storage destination'); return }
     if (!form.name.trim()) { setFormError('Job name required'); return }
     const data = { ...form }
-    if (!data.encrypt) delete data.encrypt_passphrase
+    // Omit the passphrase unless the user typed one: the API treats an absent field
+    // as "keep the stored passphrase". Sending an empty string used to wipe it and
+    // silently downgrade the job to plaintext backups.
+    if (!data.encrypt || !data.encrypt_passphrase) delete data.encrypt_passphrase
+    if (!editJob && form.encrypt && !form.encrypt_passphrase) {
+      setFormError('Passphrase required to enable encryption')
+      return
+    }
     if (editJob) {
       updateMut.mutate({ id: editJob.id, data })
     } else {
@@ -436,10 +443,17 @@ export default function Jobs() {
                 <Label>Passphrase</Label>
                 <Input
                   type="password"
+                  autoComplete="new-password"
                   value={form.encrypt_passphrase ?? ''}
                   onChange={e => setForm(f => ({ ...f, encrypt_passphrase: e.target.value }))}
-                  placeholder="Encryption passphrase"
+                  placeholder={editJob ? 'Leave blank to keep current passphrase' : 'Encryption passphrase'}
                 />
+                {editJob && (
+                  <p className="text-xs text-muted-foreground">
+                    Leave blank to keep the current passphrase. Backups already made with a
+                    different passphrase can only be restored with that original passphrase.
+                  </p>
+                )}
               </div>
             )}
 

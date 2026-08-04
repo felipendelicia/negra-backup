@@ -44,7 +44,11 @@ func NewS3Backend(cfg models.S3StorageConfig) (*S3Backend, error) {
 }
 
 func (b *S3Backend) Upload(filename string, r io.Reader, size int64) error {
-	key := path.Join("nat-backup", filename)
+	prefix := b.cfg.Prefix
+	if prefix == "" {
+		prefix = "nat-backup"
+	}
+	key := path.Join(prefix, filename)
 
 	_, err := b.client.PutObject(context.Background(), &s3.PutObjectInput{
 		Bucket:        aws.String(b.cfg.Bucket),

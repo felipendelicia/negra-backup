@@ -107,11 +107,14 @@ type LocalStorageConfig struct {
 }
 
 type S3StorageConfig struct {
-	Endpoint  string `json:"endpoint"`
+	Endpoint  string `json:"endpoint,omitempty"`
 	Bucket    string `json:"bucket"`
 	Region    string `json:"region"`
 	AccessKey string `json:"access_key"`
 	SecretKey string `json:"secret_key"`
+	// Prefix is the key prefix under which backups are stored. Empty means the
+	// bucket root.
+	Prefix string `json:"prefix,omitempty"`
 }
 
 type SFTPStorageConfig struct {

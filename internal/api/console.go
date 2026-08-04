@@ -42,18 +42,20 @@ func (h *ConsoleHub) Write(p []byte) (int, error) {
 	if h.head == 0 {
 		h.full = true
 	}
-	subs := make([]chan []byte, 0, len(h.subs))
+	// The fan-out stays under the lock. Collecting the subscribers and releasing
+	// first left a window in which unsubscribe could close a channel this loop was
+	// about to send on. Since Write is the io.Writer behind the global logger, that
+	// panic could fire from any goroutine — including the cron scheduler and the
+	// agent write pumps, which have no recover and take the process down with them.
+	// The sends are non-blocking, so holding the lock adds no latency.
 	for ch := range h.subs {
-		subs = append(subs, ch)
-	}
-	h.mu.Unlock()
-
-	for _, ch := range subs {
 		select {
 		case ch <- line:
 		default: // drop if subscriber is slow
 		}
 	}
+	h.mu.Unlock()
+
 	return len(p), nil
 }
 
@@ -94,9 +96,11 @@ func (h *ConsoleHub) subscribe() chan []byte {
 }
 
 func (h *ConsoleHub) unsubscribe(ch chan []byte) {
+	// close must happen under the same lock that guards the fan-out in Write,
+	// otherwise a concurrent broadcast can send on the closed channel.
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	delete(h.subs, ch)
-	h.mu.Unlock()
 	close(ch)
 }
 
