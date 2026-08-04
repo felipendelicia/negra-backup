@@ -124,6 +124,8 @@ func (s *Server) handleRunLogsWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	// Read-only for the client; bound anything it sends.
+	conn.SetReadLimit(4096)
 
 	ch := s.hub.SubscribeRunLogs(id.String())
 	defer s.hub.UnsubscribeRunLogs(id.String(), ch)

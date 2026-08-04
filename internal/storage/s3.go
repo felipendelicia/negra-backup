@@ -43,12 +43,27 @@ func NewS3Backend(cfg models.S3StorageConfig) (*S3Backend, error) {
 	return &S3Backend{client: client, cfg: cfg}, nil
 }
 
-func (b *S3Backend) Upload(filename string, r io.Reader, size int64) error {
+func (b *S3Backend) key(filename string) string {
 	prefix := b.cfg.Prefix
 	if prefix == "" {
 		prefix = "nat-backup"
 	}
-	key := path.Join(prefix, filename)
+	return path.Join(prefix, filename)
+}
+
+func (b *S3Backend) Delete(filename string) error {
+	_, err := b.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+		Bucket: aws.String(b.cfg.Bucket),
+		Key:    aws.String(b.key(filename)),
+	})
+	if err != nil {
+		return fmt.Errorf("s3 delete object: %w", err)
+	}
+	return nil
+}
+
+func (b *S3Backend) Upload(filename string, r io.Reader, size int64) error {
+	key := b.key(filename)
 
 	_, err := b.client.PutObject(context.Background(), &s3.PutObjectInput{
 		Bucket:        aws.String(b.cfg.Bucket),

@@ -1,2 +1,2 @@
 // Re-export from auth-context for backward compatibility
-export { useAuth, getToken } from './auth-context'
+export { useAuth, getToken, clearToken, TOKEN_KEY } from './auth-context'

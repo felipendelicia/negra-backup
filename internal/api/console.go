@@ -135,6 +135,9 @@ func (s *Server) handleConsoleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	// This socket is read-only for the client; anything it sends is a control frame
+	// at most. Bound it so a client cannot stream unbounded data into the server.
+	conn.SetReadLimit(4096)
 
 	ch := s.consoleHub.subscribe()
 	defer s.consoleHub.unsubscribe(ch)

@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react'
 
-const TOKEN_KEY = 'nat_backup_token'
+export const TOKEN_KEY = 'nat_backup_token'
 
 interface AuthContextValue {
   token: string | null
@@ -41,4 +41,12 @@ export function useAuth() {
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
+}
+
+/**
+ * Drops the persisted session. Callable from outside React (e.g. the API
+ * client on a 401) so the token key lives in exactly one place.
+ */
+export function clearToken(): void {
+  localStorage.removeItem(TOKEN_KEY)
 }

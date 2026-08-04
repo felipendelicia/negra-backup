@@ -1,9 +1,11 @@
-import { getToken } from './auth'
+import { getToken, clearToken } from './auth'
 import type {
   Agent, BackupJob, BackupRun, StorageDestination,
   NotificationSettings, CreateJobRequest, CreateStorageRequest,
   EmailNotificationConfig,
 } from './types'
+
+const LOGIN_PATH = '/login'
 
 export class APIError extends Error {
   status: number
@@ -30,9 +32,15 @@ async function request<T>(method: string, path: string, body?: unknown, signal?:
   })
 
   if (!res.ok) {
-    if (res.status === 401) {
-      localStorage.removeItem('nat_backup_token')
-      window.location.href = '/login'
+    // A 401 from /api/auth/* means "those credentials are wrong", not "your
+    // session died" — swallowing it into a redirect would wipe the login form
+    // (and its error message) before the user ever sees why it failed.
+    if (res.status === 401 && !path.startsWith('/api/auth/')) {
+      clearToken()
+      if (window.location.pathname !== LOGIN_PATH) {
+        // replace(), not href: the expired page must not stay in history.
+        window.location.replace(LOGIN_PATH)
+      }
     }
     const err = await res.json().catch(() => ({ error: res.statusText }))
     throw new APIError(res.status, (err as { error?: string }).error || res.statusText)

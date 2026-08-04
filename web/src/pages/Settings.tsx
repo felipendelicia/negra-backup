@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useTheme } from 'next-themes'
 import { api } from 'src/lib/api'
@@ -30,24 +30,32 @@ const THEMES = [
 export default function Settings() {
   const { theme: currentTheme, setTheme } = useTheme()
 
-  const [config, setConfig] = useState<EmailNotificationConfig>(defaultConfig())
-  const [toStr, setToStr] = useState('')
+  // `null` means "untouched" — the field then mirrors whatever the server
+  // returned. Deriving instead of copying into state on load avoids a
+  // render-cascade effect and keeps the form in sync with a refetch.
+  const [draft, setDraft] = useState<EmailNotificationConfig | null>(null)
+  const [toDraft, setToDraft] = useState<string | null>(null)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'error'>('idle')
   const [errorMsg, setErrorMsg] = useState('')
-  const [initialized, setInitialized] = useState(false)
 
   const { data: settings, isError } = useQuery({
     queryKey: ['notification-settings'],
     queryFn: ({ signal }) => api.getNotificationSettings(signal),
   })
 
-  useEffect(() => {
-    if (!initialized && settings && 'type' in settings && settings.type === 'email') {
-      setConfig(settings.config as EmailNotificationConfig)
-      setToStr((settings.config as EmailNotificationConfig).to.join(', '))
-      setInitialized(true)
+  const loaded = useMemo<EmailNotificationConfig>(() => {
+    if (settings && 'type' in settings && settings.type === 'email') {
+      return { ...defaultConfig(), ...settings.config }
     }
-  }, [initialized, settings])
+    return defaultConfig()
+  }, [settings])
+
+  const config = draft ?? loaded
+  const toStr = toDraft ?? loaded.to.join(', ')
+
+  function patchConfig(patch: Partial<EmailNotificationConfig>) {
+    setDraft({ ...config, ...patch })
+  }
 
   const saveMut = useMutation({
     mutationFn: (data: { type: string; config: EmailNotificationConfig }) =>
@@ -87,7 +95,9 @@ export default function Settings() {
               {THEMES.map(({ value, label, icon: Icon }) => (
                 <button
                   key={value}
+                  type="button"
                   onClick={() => setTheme(value)}
+                  aria-pressed={currentTheme === value}
                   className={cn(
                     'flex-1 flex flex-col items-center gap-2 p-4 rounded-lg border-2 transition-all text-sm',
                     currentTheme === value
@@ -95,7 +105,7 @@ export default function Settings() {
                       : 'border-border text-muted-foreground hover:border-foreground/30 hover:text-foreground'
                   )}
                 >
-                  <Icon className="h-5 w-5" />
+                  <Icon aria-hidden="true" className="h-5 w-5" />
                   {label}
                 </button>
               ))}
@@ -122,7 +132,7 @@ export default function Settings() {
                 <Input
                   id="smtp_host"
                   value={config.smtp_host}
-                  onChange={e => setConfig(c => ({ ...c, smtp_host: e.target.value }))}
+                  onChange={e => patchConfig({ smtp_host: e.target.value })}
                   placeholder="smtp.gmail.com"
                 />
               </div>
@@ -134,7 +144,7 @@ export default function Settings() {
                   id="smtp_port"
                   type="number"
                   value={config.smtp_port}
-                  onChange={e => setConfig(c => ({ ...c, smtp_port: parseInt(e.target.value) || 587 }))}
+                  onChange={e => patchConfig({ smtp_port: parseInt(e.target.value) || 587 })}
                 />
               </div>
             </div>
@@ -147,7 +157,7 @@ export default function Settings() {
                 id="from"
                 type="email"
                 value={config.from}
-                onChange={e => setConfig(c => ({ ...c, from: e.target.value }))}
+                onChange={e => patchConfig({ from: e.target.value })}
                 placeholder="backup@example.com"
               />
             </div>
@@ -159,7 +169,7 @@ export default function Settings() {
               <Input
                 id="to"
                 value={toStr}
-                onChange={e => setToStr(e.target.value)}
+                onChange={e => setToDraft(e.target.value)}
                 placeholder="admin@example.com, ops@example.com"
               />
             </div>
@@ -172,7 +182,7 @@ export default function Settings() {
                 <Input
                   id="username"
                   value={config.username ?? ''}
-                  onChange={e => setConfig(c => ({ ...c, username: e.target.value }))}
+                  onChange={e => patchConfig({ username: e.target.value })}
                   placeholder="optional"
                 />
               </div>
@@ -184,7 +194,7 @@ export default function Settings() {
                   id="password"
                   type="password"
                   value={config.password ?? ''}
-                  onChange={e => setConfig(c => ({ ...c, password: e.target.value }))}
+                  onChange={e => patchConfig({ password: e.target.value })}
                   placeholder="optional"
                 />
               </div>
@@ -192,13 +202,14 @@ export default function Settings() {
 
             <div className="flex items-center gap-3">
               <Switch
+                id="tls"
                 checked={config.tls}
-                onCheckedChange={v => setConfig(c => ({ ...c, tls: v }))}
+                onCheckedChange={v => patchConfig({ tls: v })}
               />
-              <Label className="text-sm">Use TLS</Label>
+              <Label htmlFor="tls" className="text-sm">Use TLS</Label>
             </div>
 
-            <div className="flex items-center gap-4 pt-1">
+            <div className="flex items-center gap-4 pt-1" role="status">
               <Button type="submit" disabled={saveMut.isPending} size="sm">
                 {saveMut.isPending ? 'Saving…' : 'Save Settings'}
               </Button>

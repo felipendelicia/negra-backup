@@ -11,6 +11,9 @@ import (
 // Backend is the interface all storage backends implement.
 type Backend interface {
 	Upload(filename string, r io.Reader, size int64) error
+	// Delete removes a previously uploaded backup. Deleting something that is
+	// already gone must succeed, so retention stays idempotent across retries.
+	Delete(filename string) error
 }
 
 // LocalConfig holds config for the local filesystem backend.

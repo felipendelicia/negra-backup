@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api } from 'src/lib/api'
+import { getToken } from 'src/lib/auth'
 import { StatusBadge } from 'src/components/StatusBadge'
 import { Button } from 'src/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'src/components/ui/card'
@@ -11,65 +12,145 @@ import { FileText, X } from 'lucide-react'
 import { cn } from 'src/lib/utils'
 import type { BackupRun } from 'src/lib/types'
 
+/** Rendered scrollback per run. */
+const MAX_LOG_LINES = 2000
+const BASE_RECONNECT_MS = 1_000
+const MAX_RECONNECT_MS = 15_000
+const MAX_RECONNECT_ATTEMPTS = 5
+
+/** Synthetic transcript for a run that already finished. */
+function summaryLines(run: BackupRun): string[] {
+  const lines: string[] = []
+  if (run.status === 'success') {
+    lines.push(`✓ Backup completed successfully`)
+    if (run.file_count != null) lines.push(`  Files backed up: ${run.file_count}`)
+    if (run.size_bytes  != null) lines.push(`  Total size: ${formatBytes(run.size_bytes)}`)
+    if (run.storage_path)        lines.push(`  Stored at: ${run.storage_path}`)
+    if (run.finished_at)         lines.push(`  Finished: ${new Date(run.finished_at).toLocaleString()}`)
+  } else if (run.status === 'failed') {
+    lines.push(`✗ Backup failed`)
+    if (run.error_message) lines.push(`  Error: ${run.error_message}`)
+    if (run.finished_at)   lines.push(`  Failed at: ${new Date(run.finished_at).toLocaleString()}`)
+  } else if (run.status === 'cancelled') {
+    lines.push(`⊘ Run cancelled by user`)
+    if (run.finished_at)  lines.push(`  Cancelled at: ${new Date(run.finished_at).toLocaleString()}`)
+  }
+  return lines
+}
+
+interface LiveState {
+  runId: string
+  connected: boolean
+  error: string
+  lines: string[]
+}
+
+const emptyLive: LiveState = { runId: '', connected: false, error: '', lines: [] }
+
+/**
+ * Streams logs for a running backup. Finished runs render a summary derived
+ * from the run itself — no state, so switching runs can never show stale lines.
+ */
 function useLiveLogs(run: BackupRun | null) {
-  const [logs, setLogs] = useState<string[]>([])
-  const [connected, setConnected] = useState(false)
+  const runId = run?.id ?? null
+  const isRunning = run?.status === 'running'
+
+  const [live, setLive] = useState<LiveState>(emptyLive)
   const wsRef = useRef<WebSocket | null>(null)
 
+  const summary = useMemo(
+    () => (run && run.status !== 'running' ? summaryLines(run) : []),
+    [run]
+  )
+
   useEffect(() => {
-    if (!run) {
-      setLogs([])
-      setConnected(false)
-      return
+    if (!runId || !isRunning) return
+
+    let cancelled = false
+    let attempt = 0
+    let timer: number | null = null
+
+    // Only ever writes state belonging to the run this effect is bound to.
+    const update = (fn: (s: LiveState) => LiveState) => {
+      if (cancelled) return
+      setLive(prev => fn(prev.runId === runId ? prev : { ...emptyLive, runId }))
     }
 
-    setLogs([])
-
-    if (run.status !== 'running') {
-      const lines: string[] = []
-      if (run.status === 'success') {
-        lines.push(`✓ Backup completed successfully`)
-        if (run.file_count != null) lines.push(`  Files backed up: ${run.file_count}`)
-        if (run.size_bytes  != null) lines.push(`  Total size: ${formatBytes(run.size_bytes)}`)
-        if (run.storage_path)        lines.push(`  Stored at: ${run.storage_path}`)
-        if (run.finished_at)         lines.push(`  Finished: ${new Date(run.finished_at).toLocaleString()}`)
-      } else if (run.status === 'failed') {
-        lines.push(`✗ Backup failed`)
-        if (run.error_message) lines.push(`  Error: ${run.error_message}`)
-        if (run.finished_at)   lines.push(`  Failed at: ${new Date(run.finished_at).toLocaleString()}`)
-      } else if (run.status === 'cancelled') {
-        lines.push(`⊘ Run cancelled by user`)
-        if (run.finished_at)  lines.push(`  Cancelled at: ${new Date(run.finished_at).toLocaleString()}`)
+    const scheduleRetry = () => {
+      if (cancelled) return
+      if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+        update(s => ({ ...s, error: 'Log stream unavailable. Close and reopen this run to retry.' }))
+        return
       }
-      setLogs(lines)
-      return
+      const delay = Math.min(BASE_RECONNECT_MS * 2 ** attempt, MAX_RECONNECT_MS)
+      attempt++
+      update(s => ({ ...s, error: `Log stream disconnected — reconnecting in ${Math.round(delay / 1000)}s…` }))
+      timer = window.setTimeout(open, delay)
     }
 
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${proto}//${window.location.host}/api/runs/${run.id}/logs/ws`
+    function open() {
+      timer = null
+      if (cancelled) return
 
-    try {
-      const ws = new WebSocket(url)
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      // The token rides in the query string: browsers cannot set headers on a
+      // WebSocket handshake.
+      const token = getToken()
+      const qs = token ? `?token=${encodeURIComponent(token)}` : ''
+      const url = `${proto}//${window.location.host}/api/runs/${runId}/logs/ws${qs}`
+
+      let ws: WebSocket
+      try {
+        ws = new WebSocket(url)
+      } catch {
+        scheduleRetry()
+        return
+      }
+
       wsRef.current = ws
-      ws.onopen    = () => setConnected(true)
-      ws.onmessage = (e) => setLogs(prev => [...prev, e.data as string])
-      ws.onclose   = () => setConnected(false)
-      ws.onerror   = () => { setConnected(false); ws.close() }
-    } catch {
-      setConnected(false)
+
+      ws.onopen = () => {
+        attempt = 0
+        update(s => ({ ...s, connected: true, error: '' }))
+      }
+      ws.onmessage = (e) => {
+        update(s => ({ ...s, lines: [...s.lines, e.data as string].slice(-MAX_LOG_LINES) }))
+      }
+      // onerror is always followed by onclose; reconnect logic lives there only.
+      ws.onerror = () => {}
+      ws.onclose = () => {
+        if (wsRef.current !== ws) return // superseded or unmounted
+        wsRef.current = null
+        update(s => ({ ...s, connected: false }))
+        scheduleRetry()
+      }
     }
 
-    return () => { wsRef.current?.close(); wsRef.current = null }
-  }, [run?.id, run?.status])
+    open()
 
-  return { logs, connected }
+    return () => {
+      cancelled = true
+      if (timer !== null) window.clearTimeout(timer)
+      const ws = wsRef.current
+      wsRef.current = null
+      ws?.close()
+    }
+  }, [runId, isRunning])
+
+  const active = live.runId === runId ? live : emptyLive
+
+  return {
+    logs: isRunning ? active.lines : summary,
+    connected: isRunning && active.connected,
+    error: isRunning ? active.error : '',
+  }
 }
 
 const FILTERS = ['', 'running', 'success', 'failed', 'cancelled'] as const
 
 export default function Runs() {
   const queryClient = useQueryClient()
-  const [selectedRun, setSelectedRun] = useState<BackupRun | null>(null)
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [filterStatus, setFilterStatus] = useState<string>('')
   const logsEndRef = useRef<HTMLDivElement>(null)
 
@@ -78,7 +159,7 @@ export default function Runs() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['runs'] })
       toast.success('Run cancelled')
-      setSelectedRun(null)
+      setSelectedRunId(null)
     },
     onError: (err: Error) => toast.error(`Failed to cancel: ${err.message}`),
   })
@@ -94,7 +175,11 @@ export default function Runs() {
     queryFn: ({ signal }) => api.listJobs(signal),
   })
 
-  const { logs, connected } = useLiveLogs(selectedRun)
+  // Read the selection out of the polled list so an open drawer follows the
+  // run's real status instead of freezing on the snapshot taken at click time.
+  const selectedRun = selectedRunId ? runs.find(r => r.id === selectedRunId) ?? null : null
+
+  const { logs, connected, error: logsError } = useLiveLogs(selectedRun)
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -108,11 +193,13 @@ export default function Runs() {
         <h2 className="font-sans font-bold text-2xl tracking-tight">Run History</h2>
 
         {/* Filter pills */}
-        <div className="flex gap-1">
+        <div className="flex gap-1" role="group" aria-label="Filter runs by status">
           {FILTERS.map(s => (
             <button
               key={s}
+              type="button"
               onClick={() => setFilterStatus(s)}
+              aria-pressed={filterStatus === s}
               className={cn(
                 'px-3 py-1 rounded text-xs font-medium transition-colors',
                 filterStatus === s
@@ -173,22 +260,24 @@ export default function Runs() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+                      className="h-7 w-7 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
                       onClick={(e) => { e.stopPropagation(); cancelMutation.mutate(run.id) }}
                       disabled={cancelMutation.isPending}
                       title="Cancel run"
+                      aria-label={`Cancel run ${run.id.slice(0, 8)}`}
                     >
-                      <X className="h-3.5 w-3.5" />
+                      <X aria-hidden="true" className="h-3.5 w-3.5" />
                     </Button>
                   )}
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
-                    onClick={() => setSelectedRun(run)}
+                    className="h-7 w-7 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                    onClick={() => setSelectedRunId(run.id)}
                     title="View logs"
+                    aria-label={`View logs for run ${run.id.slice(0, 8)}`}
                   >
-                    <FileText className="h-3.5 w-3.5" />
+                    <FileText aria-hidden="true" className="h-3.5 w-3.5" />
                   </Button>
                 </div>
               )
@@ -198,7 +287,7 @@ export default function Runs() {
       </Card>
 
       {/* ── Log drawer ──────────────────────────────────────────────── */}
-      <Sheet open={selectedRun !== null} onOpenChange={(o) => !o && setSelectedRun(null)}>
+      <Sheet open={selectedRun !== null} onOpenChange={(o) => !o && setSelectedRunId(null)}>
         <SheetContent side="right" className="w-full sm:max-w-2xl flex flex-col gap-0 p-0">
           <SheetHeader className="px-5 py-4 border-b">
             <SheetTitle className="flex items-center gap-3 text-sm">
@@ -221,7 +310,7 @@ export default function Runs() {
                         onClick={() => cancelMutation.mutate(selectedRun.id)}
                         disabled={cancelMutation.isPending}
                       >
-                        <X className="h-3 w-3 mr-1" />
+                        <X aria-hidden="true" className="h-3 w-3 mr-1" />
                         Cancel
                       </Button>
                     </>
@@ -246,8 +335,17 @@ export default function Runs() {
                 </div>
               )}
 
+              {logsError && (
+                <p role="status" className="text-xs text-muted-foreground">{logsError}</p>
+              )}
+
               {/* Terminal */}
-              <div className="flex-1 bg-zinc-950 rounded border border-zinc-800 p-4 font-mono text-xs overflow-auto min-h-0">
+              <div
+                className="flex-1 bg-zinc-950 rounded border border-zinc-800 p-4 font-mono text-xs overflow-auto min-h-0"
+                role="log"
+                aria-live="polite"
+                aria-label="Run output"
+              >
                 {logs.length === 0 ? (
                   <span className="text-zinc-600">
                     {selectedRun.status === 'running' ? 'Waiting for output…' : 'No output recorded.'}

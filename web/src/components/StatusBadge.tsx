@@ -23,7 +23,7 @@ export function StatusBadge({ status, className }: Props) {
 
   return (
     <span className={cn('inline-flex items-center gap-1.5 text-xs font-medium tabular-nums shrink-0', cfg.text, className)}>
-      <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', cfg.dot)} />
+      <span aria-hidden="true" className={cn('w-1.5 h-1.5 rounded-full shrink-0', cfg.dot)} />
       {cfg.label}
     </span>
   )

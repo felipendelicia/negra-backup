@@ -14,6 +14,11 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// maxAgentMessageBytes caps a single agent frame. Browse results for a large
+// directory are the biggest legitimate message, so this leaves ample headroom
+// while still bounding an abusive or buggy client.
+const maxAgentMessageBytes = 8 << 20 // 8 MiB
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
@@ -53,6 +58,9 @@ func (h *AgentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Without a read limit a single unauthenticated frame can be arbitrarily large
+	// and exhaust server memory before the hello message is even validated.
+	conn.SetReadLimit(maxAgentMessageBytes)
 	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	_, data, err := conn.ReadMessage()
 	if err != nil {

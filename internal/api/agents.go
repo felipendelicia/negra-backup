@@ -31,6 +31,16 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
+	// Collect the job ids before the cascade removes them: the cron entries live in
+	// the scheduler's memory, and leaving them behind means the cron keeps firing
+	// for a deleted agent, failing on a foreign key on every tick, forever.
+	var jobIDs []string
+	if err := s.db.Select(&jobIDs, `SELECT id FROM backup_jobs WHERE agent_id = $1`, id); err != nil {
+		log.Printf("handleDeleteAgent: list jobs: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
 	result, err := s.db.Exec(`DELETE FROM agents WHERE id = $1`, id)
 	if err != nil {
 		log.Printf("handleDeleteAgent: %v", err)
@@ -41,6 +51,12 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	if rows == 0 {
 		respondError(w, http.StatusNotFound, "agent not found")
 		return
+	}
+
+	if s.sched != nil {
+		for _, jobID := range jobIDs {
+			s.sched.RemoveJob(jobID)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -4,7 +4,11 @@ package api
 import (
 	"encoding/json"
 	"io/fs"
+	"log"
 	"net/http"
+	"net/url"
+	"strings"
+	"time"
 
 	apiStatic "github.com/felipendelicia/nat-backup/internal/api/static"
 	"github.com/felipendelicia/nat-backup/internal/config"
@@ -16,13 +20,13 @@ import (
 )
 
 type Server struct {
-	router      chi.Router
-	db          *sqlx.DB
-	cfg         config.Config
-	hub         *ws.Hub
-	wsHandler   *ws.AgentHandler
-	consoleHub  *ConsoleHub
-	sched       interface {
+	router     chi.Router
+	db         *sqlx.DB
+	cfg        config.Config
+	hub        *ws.Hub
+	wsHandler  *ws.AgentHandler
+	consoleHub *ConsoleHub
+	sched      interface {
 		AddJob(job models.BackupJob) error
 		RemoveJob(jobID string)
 	}
@@ -110,11 +114,60 @@ func (s *Server) buildRouterWithStatic() chi.Router {
 	return r
 }
 
+// redactQueryToken strips the value of a ?token= parameter from a URI so the JWT
+// used to authenticate the console and run-log WebSockets never reaches the logs.
+func redactQueryToken(uri string) string {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return uri
+	}
+	q := u.Query()
+	if !q.Has("token") {
+		return uri
+	}
+	q.Set("token", "REDACTED")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// requestLogger logs each request through the standard library logger. chi's
+// middleware.Logger builds its own log.New(os.Stdout, ...), which log.SetOutput
+// cannot redirect — so request lines never reached the console hub and the page
+// showed no traffic at all. Routing through log.Default() fixes that, and the URI
+// is redacted so query-string tokens are not persisted.
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		start := time.Now()
+		defer func() {
+			log.Printf("%s %s %s %d %dB %s",
+				r.Method, redactQueryToken(r.RequestURI), r.Proto,
+				ww.Status(), ww.BytesWritten(), time.Since(start))
+		}()
+		next.ServeHTTP(ww, r)
+	})
+}
+
+// maxJSONBody caps request bodies on the JSON API. Without it any endpoint accepts
+// an unbounded body and a single request can exhaust server memory.
+const maxJSONBody = 1 << 20 // 1 MiB
+
+func limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The upload endpoint streams multi-gigabyte archives and sets its own limit.
+		if r.Body != nil && !strings.HasPrefix(r.URL.Path, "/api/upload/") {
+			r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) buildRouter() chi.Router {
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(requestLogger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
+	r.Use(limitBody)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -124,9 +177,13 @@ func (s *Server) buildRouter() chi.Router {
 	r.Get("/ws/agent", s.wsHandler.ServeHTTP)
 
 	// WebSocket for server console logs (auth via ?token= query param)
-	r.Get("/ws/console", s.handleConsoleWS)
+	consoleLimiter := newRateLimiter(30, time.Minute)
+	r.With(consoleLimiter.middleware).Get("/ws/console", s.handleConsoleWS)
 
-	r.Post("/api/auth/login", s.handleLogin)
+	// Login and the console socket are the two unauthenticated entry points that
+	// take a credential, so both are throttled per IP.
+	loginLimiter := newRateLimiter(10, time.Minute)
+	r.With(loginLimiter.middleware).Post("/api/auth/login", s.handleLogin)
 
 	// Agent-authenticated routes (API key in Authorization: Bearer header)
 	r.Group(func(r chi.Router) {

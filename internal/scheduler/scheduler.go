@@ -14,7 +14,7 @@ import (
 )
 
 type JobDispatcher interface {
-	DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage, passphrase string)
+	DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage, passphrase string) error
 }
 
 type Scheduler struct {
@@ -100,49 +100,98 @@ func (s *Scheduler) triggerJob(job models.BackupJob) {
 		return
 	}
 
+	// Everything that can fail is resolved before the run row exists. Inserting
+	// first and hoping meant an offline agent, an unreadable destination or an
+	// undecryptable passphrase left a row stuck in 'running' with nobody to close
+	// it: invisible to retention, and a Cancel button in the UI that did nothing.
+	storageType, storageConfig, err := s.resolveStorage(job)
+	if err != nil {
+		s.recordFailedRun(job, fmt.Sprintf("storage destination unavailable: %v", err))
+		return
+	}
+
+	passphrase, err := s.resolvePassphrase(job)
+	if err != nil {
+		// Dispatching anyway would produce a plaintext archive named ".enc".
+		s.recordFailedRun(job, fmt.Sprintf("backup passphrase unavailable: %v", err))
+		return
+	}
+
 	var runID string
-	err := s.db.QueryRow(
+	if err := s.db.QueryRow(
 		`INSERT INTO backup_runs (job_id, status) VALUES ($1, 'running') RETURNING id`,
 		job.ID,
-	).Scan(&runID)
-	if err != nil {
+	).Scan(&runID); err != nil {
 		log.Printf("scheduler create run for job %s: %v", job.ID, err)
 		return
 	}
 
-	// Fetch storage destination
-	var destType string
-	var encryptedConfig string
-	var storageType string
-	var storageConfig json.RawMessage
+	log.Printf("scheduler dispatching job %s (run %s) to agent %s", job.ID, runID, job.AgentID)
+	if err := s.dispatcher.DispatchJob(
+		job.AgentID.String(), runID, job, storageType, storageConfig, passphrase,
+	); err != nil {
+		log.Printf("scheduler dispatch job %s: %v", job.ID, err)
+		s.failRun(runID, err.Error())
+	}
+}
 
+// resolveStorage loads and decrypts the job's storage destination.
+func (s *Scheduler) resolveStorage(job models.BackupJob) (string, json.RawMessage, error) {
+	var destType, encryptedConfig string
 	if err := s.db.QueryRow(
 		`SELECT type, config FROM storage_destinations WHERE id = $1`,
 		job.StorageDestinationID,
 	).Scan(&destType, &encryptedConfig); err != nil {
-		log.Printf("scheduler fetch storage for job %s: %v", job.ID, err)
-	} else if s.encKey != "" {
-		decrypted, decErr := crypto.Decrypt(s.encKey, encryptedConfig)
-		if decErr != nil {
-			log.Printf("scheduler decrypt storage for job %s: %v", job.ID, decErr)
-		} else {
-			storageType = destType
-			storageConfig = json.RawMessage(decrypted)
-		}
+		return "", nil, err
 	}
-
-	var passphrase string
-	if job.Encrypt && job.EncryptPassphrase != nil {
-		decPass, decErr := crypto.Decrypt(s.encKey, *job.EncryptPassphrase)
-		if decErr != nil {
-			log.Printf("scheduler decrypt passphrase for job %s: %v", job.ID, decErr)
-		} else {
-			passphrase = decPass
-		}
+	if s.encKey == "" {
+		return "", nil, fmt.Errorf("no encryption key configured")
 	}
+	decrypted, err := crypto.Decrypt(s.encKey, encryptedConfig)
+	if err != nil {
+		return "", nil, fmt.Errorf("decrypt storage config: %w", err)
+	}
+	return destType, json.RawMessage(decrypted), nil
+}
 
-	log.Printf("scheduler dispatching job %s (run %s) to agent %s", job.ID, runID, job.AgentID)
-	s.dispatcher.DispatchJob(job.AgentID.String(), runID, job, storageType, storageConfig, passphrase)
+// resolvePassphrase decrypts the job's backup passphrase. For an encrypted job a
+// missing or undecryptable passphrase is fatal, never an empty string.
+func (s *Scheduler) resolvePassphrase(job models.BackupJob) (string, error) {
+	if !job.Encrypt {
+		return "", nil
+	}
+	if job.EncryptPassphrase == nil {
+		return "", fmt.Errorf("job is encrypted but has no stored passphrase")
+	}
+	decPass, err := crypto.Decrypt(s.encKey, *job.EncryptPassphrase)
+	if err != nil {
+		return "", fmt.Errorf("decrypt passphrase: %w", err)
+	}
+	if decPass == "" {
+		return "", fmt.Errorf("stored passphrase is empty")
+	}
+	return decPass, nil
+}
+
+// recordFailedRun writes a terminal run so the failure is visible in the UI instead
+// of the job silently not running.
+func (s *Scheduler) recordFailedRun(job models.BackupJob, msg string) {
+	log.Printf("scheduler job %s: %s", job.ID, msg)
+	if _, err := s.db.Exec(
+		`INSERT INTO backup_runs (job_id, status, finished_at, error_message)
+		 VALUES ($1, 'failed', NOW(), $2)`, job.ID, msg,
+	); err != nil {
+		log.Printf("scheduler record failed run for job %s: %v", job.ID, err)
+	}
+}
+
+func (s *Scheduler) failRun(runID, msg string) {
+	if _, err := s.db.Exec(
+		`UPDATE backup_runs SET status='failed', finished_at=NOW(), error_message=$2 WHERE id=$1`,
+		runID, msg,
+	); err != nil {
+		log.Printf("scheduler fail run %s: %v", runID, err)
+	}
 }
 
 // ValidateCron returns an error if the cron expression is invalid.

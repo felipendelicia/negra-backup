@@ -159,13 +159,15 @@ func (h *Hub) IsConnected(agentID string) bool {
 	return ok
 }
 
-func (h *Hub) DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage, passphrase string) {
+// DispatchJob sends a run_job message to the agent. It returns an error when the
+// job could not be handed off, so the caller can fail the run instead of leaving it
+// stuck in 'running' forever — which is what happened when this returned nothing.
+func (h *Hub) DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage, passphrase string) error {
 	h.mu.RLock()
 	ac, ok := h.agents[agentID]
 	h.mu.RUnlock()
 	if !ok {
-		log.Printf("dispatch: agent %s not connected", agentID)
-		return
+		return fmt.Errorf("agent %s is not connected", agentID)
 	}
 
 	msg := ServerMessage{
@@ -178,16 +180,16 @@ func (h *Hub) DispatchJob(agentID, runID string, job models.BackupJob, storageTy
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
-		log.Printf("dispatch marshal: %v", err)
-		return
+		return fmt.Errorf("dispatch marshal: %w", err)
 	}
 
 	select {
 	case ac.send <- data:
+		return nil
 	case <-ac.done:
-		log.Printf("dispatch: agent %s disconnected before dispatch", agentID)
+		return fmt.Errorf("agent %s disconnected before dispatch", agentID)
 	default:
-		log.Printf("dispatch: agent %s send buffer full", agentID)
+		return fmt.Errorf("agent %s send buffer full", agentID)
 	}
 }
 

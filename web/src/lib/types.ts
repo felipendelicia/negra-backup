@@ -39,6 +39,7 @@ export interface SFTPStorageConfig {
   path: string
   password?: string
   private_key?: string
+  host_key?: string
 }
 
 export type StorageConfig = LocalStorageConfig | S3StorageConfig | SFTPStorageConfig

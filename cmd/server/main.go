@@ -61,6 +61,19 @@ func main() {
 		log.Printf("reset agent status: %v", err)
 	}
 
+	// Runs left mid-flight by the previous process have no one to finish them: the
+	// agent that was executing them is gone along with the hub. Without this they
+	// stay 'running' forever, keep the UI offering a Cancel that does nothing, and
+	// are skipped by retention, which only sweeps terminal states.
+	if res, err := pool.Exec(
+		`UPDATE backup_runs SET status='failed', finished_at=NOW(),
+		        error_message='Server restarted while this run was in progress'
+		 WHERE status='running'`); err != nil {
+		log.Printf("reset stale runs: %v", err)
+	} else if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("marked %d stale running runs as failed", n)
+	}
+
 	srv, hub, agentHandler := api.NewServerWithStatic(pool, cfg)
 
 	// Tee log output to the browser console hub
@@ -86,7 +99,7 @@ func main() {
 	}
 
 	// Start daily retention cleanup.
-	retention := notify.NewRetentionCleaner(pool, emailSender)
+	retention := notify.NewRetentionCleaner(pool, emailSender, cfg.EncryptionKey)
 	retention.StartDailySchedule()
 
 	sched := scheduler.New(pool, hub, cfg.EncryptionKey)

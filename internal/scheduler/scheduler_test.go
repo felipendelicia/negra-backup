@@ -11,9 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type mockDispatcher struct{}
+type mockDispatcher struct {
+	err error
+}
 
-func (m *mockDispatcher) DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage, passphrase string) {
+func (m *mockDispatcher) DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage, passphrase string) error {
+	return m.err
 }
 
 func TestScheduler_StartStop(t *testing.T) {

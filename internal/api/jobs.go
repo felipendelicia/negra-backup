@@ -254,6 +254,49 @@ func (s *Server) handleTriggerJob(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "job not found")
 		return
 	}
+	if s.hub == nil {
+		respondError(w, http.StatusServiceUnavailable, "dispatcher unavailable")
+		return
+	}
+	// Everything that can fail is resolved before the run row exists, so a failed
+	// trigger cannot leave a row stuck in 'running' with nothing to close it.
+	if !s.hub.IsConnected(job.AgentID.String()) {
+		respondError(w, http.StatusConflict, "agent is not online")
+		return
+	}
+
+	var destType, encryptedConfig string
+	if err := s.db.QueryRow(
+		`SELECT type, config FROM storage_destinations WHERE id = $1`,
+		job.StorageDestinationID,
+	).Scan(&destType, &encryptedConfig); err != nil {
+		log.Printf("handleTriggerJob: fetch storage: %v", err)
+		respondError(w, http.StatusInternalServerError, "storage destination not found")
+		return
+	}
+	decryptedConfig, err := crypto.Decrypt(s.cfg.EncryptionKey, encryptedConfig)
+	if err != nil {
+		log.Printf("handleTriggerJob: decrypt storage: %v", err)
+		respondError(w, http.StatusInternalServerError, "storage config decrypt failed")
+		return
+	}
+
+	// An encrypted job whose passphrase cannot be recovered must not run: it would
+	// produce a plaintext archive named ".enc" and report success.
+	var passphrase string
+	if job.Encrypt {
+		if job.EncryptPassphrase == nil {
+			respondError(w, http.StatusConflict, "job is encrypted but has no stored passphrase")
+			return
+		}
+		passphrase, err = crypto.Decrypt(s.cfg.EncryptionKey, *job.EncryptPassphrase)
+		if err != nil || passphrase == "" {
+			log.Printf("handleTriggerJob: decrypt passphrase for job %s: %v", id, err)
+			respondError(w, http.StatusInternalServerError, "backup passphrase decrypt failed")
+			return
+		}
+	}
+
 	var run models.BackupRun
 	if err := s.db.QueryRowx(
 		`INSERT INTO backup_runs (job_id, status) VALUES ($1, 'running') RETURNING id, job_id, started_at, status`,
@@ -263,35 +306,19 @@ func (s *Server) handleTriggerJob(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	if s.hub != nil {
-		// Fetch storage destination
-		var destType string
-		var encryptedConfig string
-		if err := s.db.QueryRow(
-			`SELECT type, config FROM storage_destinations WHERE id = $1`,
-			job.StorageDestinationID,
-		).Scan(&destType, &encryptedConfig); err != nil {
-			log.Printf("handleTriggerJob: fetch storage: %v", err)
-			respondError(w, http.StatusInternalServerError, "storage destination not found")
-			return
-		}
-		decryptedConfig, decErr := crypto.Decrypt(s.cfg.EncryptionKey, encryptedConfig)
-		if decErr != nil {
-			log.Printf("handleTriggerJob: decrypt storage: %v", decErr)
-			respondError(w, http.StatusInternalServerError, "storage config decrypt failed")
-			return
-		}
-		storageType := destType
-		storageConfig := json.RawMessage(decryptedConfig)
 
-		var passphrase string
-		if job.Encrypt && job.EncryptPassphrase != nil {
-			decPass, decErr := crypto.Decrypt(s.cfg.EncryptionKey, *job.EncryptPassphrase)
-			if decErr == nil {
-				passphrase = decPass
-			}
+	if err := s.hub.DispatchJob(
+		job.AgentID.String(), run.ID.String(), job, destType, json.RawMessage(decryptedConfig), passphrase,
+	); err != nil {
+		log.Printf("handleTriggerJob dispatch: %v", err)
+		if _, dbErr := s.db.Exec(
+			`UPDATE backup_runs SET status='failed', finished_at=NOW(), error_message=$2 WHERE id=$1`,
+			run.ID, err.Error(),
+		); dbErr != nil {
+			log.Printf("handleTriggerJob: fail run %s: %v", run.ID, dbErr)
 		}
-		s.hub.DispatchJob(job.AgentID.String(), run.ID.String(), job, storageType, storageConfig, passphrase)
+		respondError(w, http.StatusConflict, "could not dispatch job: "+err.Error())
+		return
 	}
 	respond(w, http.StatusCreated, run)
 }

@@ -1,4 +1,4 @@
-import { Outlet, NavLink, useNavigate } from 'react-router-dom'
+import { Outlet, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from 'src/lib/auth'
 import { useTheme } from 'next-themes'
 import { Button } from 'src/components/ui/button'
@@ -22,6 +22,7 @@ const nav = [
 export default function Layout() {
   const { logout } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
   const { resolvedTheme, setTheme } = useTheme()
 
   function handleLogout() {
@@ -44,7 +45,7 @@ export default function Layout() {
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 px-2 py-3 space-y-0.5">
+        <nav className="flex-1 px-2 py-3 space-y-0.5" aria-label="Main">
           {nav.map(({ to, icon: Icon, label }) => (
             <NavLink
               key={to}
@@ -58,7 +59,7 @@ export default function Layout() {
                 )
               }
             >
-              <Icon className="h-4 w-4 shrink-0" />
+              <Icon aria-hidden="true" className="h-4 w-4 shrink-0" />
               {label}
             </NavLink>
           ))}
@@ -72,7 +73,7 @@ export default function Layout() {
             className="flex-1 justify-start gap-2.5 text-muted-foreground hover:text-foreground text-sm"
             onClick={handleLogout}
           >
-            <LogOut className="h-4 w-4 shrink-0" />
+            <LogOut aria-hidden="true" className="h-4 w-4 shrink-0" />
             Logout
           </Button>
           <Button
@@ -81,10 +82,11 @@ export default function Layout() {
             className="h-8 w-8 text-muted-foreground hover:text-foreground shrink-0"
             onClick={toggleTheme}
             title={resolvedTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            aria-label={resolvedTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
           >
             {resolvedTheme === 'dark'
-              ? <Sun className="h-4 w-4" />
-              : <Moon className="h-4 w-4" />
+              ? <Sun aria-hidden="true" className="h-4 w-4" />
+              : <Moon aria-hidden="true" className="h-4 w-4" />
             }
           </Button>
         </div>
@@ -93,7 +95,7 @@ export default function Layout() {
       {/* ── Main content ──────────────────────────────────────── */}
       <main className="flex-1 overflow-auto">
         <div className="p-6 page-enter">
-          <ErrorBoundary>
+          <ErrorBoundary resetKey={location.pathname}>
             <Outlet />
           </ErrorBoundary>
         </div>

@@ -83,6 +83,7 @@ function ConfigFields({
         {field('user', 'Username')}
         {field('password', 'Password', undefined, 'password')}
         {field('private_key', 'Private Key (optional, PEM)', '-----BEGIN OPENSSH PRIVATE KEY-----')}
+        {field('host_key', 'Host Key (optional, pins the server identity)', 'ssh-ed25519 AAAAC3Nza...')}
         {field('path', 'Remote Path', '/backups')}
       </>
     )

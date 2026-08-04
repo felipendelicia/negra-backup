@@ -124,6 +124,10 @@ type SFTPStorageConfig struct {
 	Password   string `json:"password,omitempty"`
 	PrivateKey string `json:"private_key,omitempty"`
 	Path       string `json:"path"`
+	// HostKey pins the server's public key in authorized_keys format. When empty
+	// the agent falls back to its own ~/.ssh/known_hosts; unknown hosts are always
+	// rejected rather than blindly trusted.
+	HostKey string `json:"host_key,omitempty"`
 }
 
 // Notification config

@@ -2,6 +2,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
@@ -56,6 +57,21 @@ func Load() (Config, error) {
 
 	if len(missing) > 0 {
 		return Config{}, fmt.Errorf("missing required env vars: %v", missing)
+	}
+
+	// Validate the key here rather than letting the server boot and fail later on
+	// the first job dispatch, when the operator is no longer watching the logs.
+	// crypto expects a 64-char hex string decoding to a 32-byte AES-256 key.
+	if len(cfg.EncryptionKey) != 64 {
+		return Config{}, fmt.Errorf(
+			"ENCRYPTION_KEY must be 64 hex characters (32 bytes), got %d", len(cfg.EncryptionKey))
+	}
+	if _, err := hex.DecodeString(cfg.EncryptionKey); err != nil {
+		return Config{}, fmt.Errorf("ENCRYPTION_KEY must be valid hex: %w", err)
+	}
+
+	if cfg.TLSEnabled && (cfg.TLSCertFile == "" || cfg.TLSKeyFile == "") {
+		return Config{}, fmt.Errorf("TLS_ENABLED requires TLS_CERT_FILE and TLS_KEY_FILE")
 	}
 
 	return cfg, nil

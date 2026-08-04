@@ -28,6 +28,13 @@ function ChartTooltip({ active, payload, label }: {
   )
 }
 
+/** Local calendar day of an ISO timestamp, so buckets match the axis labels. */
+function localDayKey(d: Date): string {
+  const month = `${d.getMonth() + 1}`.padStart(2, '0')
+  const day   = `${d.getDate()}`.padStart(2, '0')
+  return `${d.getFullYear()}-${month}-${day}`
+}
+
 export default function Dashboard() {
   const { resolvedTheme } = useTheme()
   const isDark = resolvedTheme === 'dark'
@@ -41,15 +48,32 @@ export default function Dashboard() {
   const successRuns  = runs.filter(r => r.status === 'success').length
   const failedRuns   = runs.filter(r => r.status === 'failed').length
 
+  // GET /api/runs is capped server-side, so these counters describe the window
+  // we actually received — never call it "all time".
+  const windowLabel = `of last ${runs.length} run${runs.length === 1 ? '' : 's'}`
+
+  // Bucket by local calendar day: the axis is labelled in local time, so
+  // grouping by the UTC date would misfile runs on either side of midnight.
+  const perDay = new Map<string, { success: number; failed: number }>()
+  for (const run of runs) {
+    if (!run.started_at) continue
+    const started = new Date(run.started_at)
+    if (Number.isNaN(started.getTime())) continue
+    const key = localDayKey(started)
+    const bucket = perDay.get(key) ?? { success: 0, failed: 0 }
+    if (run.status === 'success') bucket.success++
+    else if (run.status === 'failed') bucket.failed++
+    perDay.set(key, bucket)
+  }
+
   const last7Days = Array.from({ length: 7 }, (_, i) => {
     const d = new Date()
     d.setDate(d.getDate() - (6 - i))
-    const key = d.toISOString().slice(0, 10)
-    const dayRuns = runs.filter(r => r.started_at?.startsWith(key))
+    const bucket = perDay.get(localDayKey(d)) ?? { success: 0, failed: 0 }
     return {
       date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      success: dayRuns.filter(r => r.status === 'success').length,
-      failed:  dayRuns.filter(r => r.status === 'failed').length,
+      success: bucket.success,
+      failed:  bucket.failed,
     }
   })
 
@@ -57,10 +81,10 @@ export default function Dashboard() {
   const successColor = isDark ? '#d4d4d4' : '#171717'
 
   const stats = [
-    { label: 'Agents Online', value: onlineAgents, sub: `${agents.length} registered`,  icon: Server,       color: '' },
-    { label: 'Active Jobs',   value: enabledJobs,  sub: `${jobs.length} total`,          icon: Briefcase,    color: '' },
-    { label: 'Successful',    value: successRuns,  sub: 'all time',                       icon: CheckCircle2, color: 'text-emerald-600 dark:text-emerald-400' },
-    { label: 'Failed',        value: failedRuns,   sub: 'all time',                       icon: XCircle,      color: failedRuns > 0 ? 'text-destructive' : '' },
+    { label: 'Agents Online', value: onlineAgents, sub: `${agents.length} registered`, icon: Server,       color: '' },
+    { label: 'Active Jobs',   value: enabledJobs,  sub: `${jobs.length} total`,        icon: Briefcase,    color: '' },
+    { label: 'Successful',    value: successRuns,  sub: windowLabel,                   icon: CheckCircle2, color: 'text-emerald-600 dark:text-emerald-400' },
+    { label: 'Failed',        value: failedRuns,   sub: windowLabel,                   icon: XCircle,      color: failedRuns > 0 ? 'text-destructive' : '' },
   ]
 
   const recentRuns = runs.slice(0, 10)
@@ -87,7 +111,7 @@ export default function Dashboard() {
               <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
                 {stat.label}
               </span>
-              <stat.icon className={cn('h-3.5 w-3.5 text-muted-foreground', stat.color && 'opacity-70')} />
+              <stat.icon aria-hidden="true" className={cn('h-3.5 w-3.5 text-muted-foreground', stat.color && 'opacity-70')} />
             </div>
             <div className={cn('font-sans font-black text-4xl leading-none tabular-nums', stat.color)}>
               {stat.value}
@@ -102,6 +126,9 @@ export default function Dashboard() {
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
             Runs — Last 7 Days
+            <span className="ml-2 text-xs font-normal normal-case tracking-normal">
+              ({windowLabel.replace(/^of /, 'from the ')})
+            </span>
           </CardTitle>
         </CardHeader>
         <CardContent>
