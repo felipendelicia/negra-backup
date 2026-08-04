@@ -300,11 +300,27 @@ func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJ
 			return
 		}
 
+		// A database backup is one large file, so progress here comes from the bytes
+		// copied out of the dump rather than from a file count. Without this callback
+		// the bar sat at zero for the whole archiving phase and then jumped to 100.
+		// The dump itself (pg_dump writing the temp file) still reports nothing:
+		// that happens before this call and the tools give no progress output.
 		result, err = backup.BackupFiles(backup.FilesConfig{
 			Paths:       []string{tmpFile.Name()},
 			Compression: job.Compression,
 			Encrypt:     job.Encrypt,
 			Passphrase:  passphrase,
+			OnProgress: func(pct int, file string) {
+				if ctx.Err() != nil {
+					return
+				}
+				a.writeJSON(ws.AgentMessage{
+					Type:        ws.MsgTypeJobProgress,
+					RunID:       runID,
+					Percent:     pct,
+					CurrentFile: file,
+				})
+			},
 		}, archive)
 
 	default:
