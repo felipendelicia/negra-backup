@@ -1,15 +1,17 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
-import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
+import { useQuery, useQueries, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api } from 'src/lib/api'
 import { getToken } from 'src/lib/auth'
 import { StatusBadge } from 'src/components/StatusBadge'
 import { CopyButton } from 'src/components/CopyButton'
+import { RestoreDialog } from 'src/components/RestoreDialog'
 import { Button } from 'src/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'src/components/ui/card'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from 'src/components/ui/sheet'
 import { formatDate, formatBytes, formatRelative } from 'src/lib/utils'
-import { FileText, X, ChevronLeft, ChevronRight, Archive, AlertTriangle } from 'lucide-react'
+import { summarizeSkips, type SkipSummary } from 'src/lib/skips'
+import { FileText, X, ChevronLeft, ChevronRight, AlertTriangle, RotateCcw, Terminal } from 'lucide-react'
 import { cn } from 'src/lib/utils'
 import type { Agent, BackupJob, BackupRun, RunStatus, StorageDestination } from 'src/lib/types'
 
@@ -191,6 +193,98 @@ function useRunLogs(run: BackupRun | null) {
   }
 }
 
+// ── Skipped files ─────────────────────────────────────────────────────────────
+
+/**
+ * A one-line marker for a run that left files behind.
+ *
+ * A backup that silently dropped files looks exactly like a complete one in the
+ * list, which is the failure mode worth shouting about — so this sits in the row
+ * itself, not behind a click. Unreadable entries (permission denied, locked
+ * files) read as an error; the routine ones (sockets, FIFOs) as a note.
+ */
+function SkipBadge({ skips, className }: { skips: SkipSummary; className?: string }) {
+  const bad = skips.suspicious > 0
+  const label = bad
+    ? `${skips.suspicious} unreadable`
+    : `${skips.total} skipped`
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap shrink-0',
+        bad
+          ? 'bg-destructive/10 text-destructive ring-1 ring-destructive/25'
+          : 'text-amber-600 dark:text-amber-500',
+        className,
+      )}
+      title={
+        bad
+          ? `${skips.suspicious} of ${skips.total} entries could not be read and are NOT in this backup`
+          : `${skips.total} entries were left out (sockets and other unbackupable files)`
+      }
+    >
+      <AlertTriangle aria-hidden="true" className="h-3 w-3 shrink-0" />
+      {label}
+    </span>
+  )
+}
+
+/** The detail view of what a run left out. */
+function SkipPanel({ skips }: { skips: SkipSummary }) {
+  const bad = skips.suspicious > 0
+  const samples = [...skips.samples].sort((a, b) => Number(b.suspicious) - Number(a.suspicious))
+  return (
+    <div
+      role={bad ? 'alert' : undefined}
+      className={cn(
+        'shrink-0 rounded border p-3 space-y-2',
+        bad
+          ? 'border-destructive/25 bg-destructive/8'
+          : 'border-amber-500/25 bg-amber-500/8',
+      )}
+    >
+      <div className="flex items-center gap-2">
+        <AlertTriangle
+          aria-hidden="true"
+          className={cn('h-3.5 w-3.5 shrink-0', bad ? 'text-destructive' : 'text-amber-600 dark:text-amber-500')}
+        />
+        <span className={cn('text-xs font-semibold', bad ? 'text-destructive' : 'text-amber-700 dark:text-amber-500')}>
+          {skips.total} {skips.total === 1 ? 'entry was' : 'entries were'} left out of this backup
+          {bad && ` — ${skips.suspicious} could not be read`}
+        </span>
+      </div>
+
+      <p className="text-[11px] text-muted-foreground leading-relaxed">
+        {bad
+          ? 'Permission denied, a locked file or an I/O error: these paths are NOT in the archive and will not come back from a restore. Fix the cause and run the job again.'
+          : 'Sockets, device nodes and other files that cannot be archived. Nothing recoverable was lost, but they will not appear in a restore either.'}
+      </p>
+
+      {samples.length > 0 && (
+        <ul className="space-y-0.5 font-mono text-[11px] max-h-40 overflow-y-auto">
+          {samples.map((s, i) => (
+            <li key={`${s.path}-${i}`} className="flex gap-2">
+              <span className={cn('shrink-0', s.suspicious ? 'text-destructive' : 'text-muted-foreground')}>
+                {s.suspicious ? '!' : '·'}
+              </span>
+              <span className="break-all">
+                <span className={s.suspicious ? 'text-destructive' : 'text-foreground'}>{s.path}</span>
+                {s.reason && <span className="text-muted-foreground"> — {s.reason}</span>}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {skips.exact && samples.length < skips.total && (
+        <p className="text-[11px] text-muted-foreground">
+          Showing {samples.length} of {skips.total}; the agent caps the sample it reports.
+        </p>
+      )}
+    </div>
+  )
+}
+
 // ── Restore ───────────────────────────────────────────────────────────────────
 
 /** Quotes a value for a POSIX shell. Job names flow into the archive filename
@@ -202,10 +296,13 @@ function shellQuote(v: string): string {
 const RESTORE_DEST = '/path/to/restore'
 
 /**
- * The exact command an operator runs to recover a finished backup.
+ * The exact command an operator runs to recover a finished backup by hand.
  *
- * There is no restore endpoint on the server — restore is an agent-side CLI
- * operation — so this shows the command rather than pretending to trigger one.
+ * The server can now drive a restore itself (`POST /api/runs/{id}/restore`), and
+ * that is the path this page offers first. This stays as the fallback for the
+ * case the API cannot cover: the agent has to be online for the server to reach
+ * it, and the machine that needs its files back is often exactly the one that is
+ * down.
  */
 function RestorePanel({ run, job, destination, agent }: {
   run: BackupRun
@@ -228,8 +325,10 @@ function RestorePanel({ run, job, destination, agent }: {
   return (
     <div className="shrink-0 rounded border border-border bg-muted/30 p-3 space-y-2">
       <div className="flex items-center gap-2">
-        <Archive aria-hidden="true" className="h-3.5 w-3.5 text-muted-foreground" />
-        <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Restore</span>
+        <Terminal aria-hidden="true" className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          Restore from the command line
+        </span>
         <CopyButton text={command} label="Copy restore command" className="ml-auto" />
       </div>
 
@@ -283,9 +382,16 @@ const FILTERS: { value: '' | RunStatus; label: string }[] = [
   { value: 'cancelled', label: 'Cancelled' },
 ]
 
+/** A finished run whose archive still exists is the only thing restorable. */
+function isRestorable(run: BackupRun): boolean {
+  return run.status === 'success' && !!run.storage_path
+}
+
 export default function Runs() {
   const queryClient = useQueryClient()
   const [selected, setSelected] = useState<BackupRun | null>(null)
+  const [restoreTarget, setRestoreTarget] = useState<BackupRun | null>(null)
+  const [showCliRestore, setShowCliRestore] = useState(false)
   const [filterStatus, setFilterStatus] = useState<'' | RunStatus>('')
   const [offset, setOffset] = useState(0)
   const terminalRef = useRef<HTMLDivElement>(null)
@@ -332,6 +438,35 @@ export default function Runs() {
     queryFn: ({ signal }) => api.listStorage(signal),
   })
 
+  // Which runs left files behind.
+  //
+  // There is no column for it: the counts live in the run's log
+  // (internal/ws/handler.go writes them on job_done), so the only way to mark the
+  // list is to read the log of every finished run on the page. It is one request
+  // per row, but a finished run's log never changes — `staleTime: Infinity` makes
+  // it once per row for the life of the page, and the drawer reuses the very same
+  // cache entry under the same key.
+  const succeeded = useMemo(() => runs.filter(r => r.status === 'success'), [runs])
+  const skipsByRun = useQueries({
+    queries: succeeded.map(run => ({
+      queryKey: ['run-logs', run.id],
+      queryFn: ({ signal }: { signal: AbortSignal }) => api.getRunLogs(run.id, signal),
+      staleTime: Infinity,
+      gcTime: 15 * 60_000,
+      retry: false,
+    })),
+    combine: (results) => {
+      const map = new Map<string, SkipSummary>()
+      results.forEach((res, i) => {
+        const run = succeeded[i]
+        if (!run || !res.data) return
+        const summary = summarizeSkips(res.data.lines)
+        if (summary) map.set(run.id, summary)
+      })
+      return map
+    },
+  })
+
   // Retention can shrink the history under an open page. Rather than correcting
   // the offset from an effect — which would cascade a second render on every
   // poll — the overshoot is rendered as its own state with a way out.
@@ -354,6 +489,8 @@ export default function Runs() {
 
   const { logs, status: liveStatus, isRunning, isLoading: logsLoading, isError: logsFailed, connected, streamError } =
     useRunLogs(selectedRun)
+
+  const selectedSkips = useMemo(() => summarizeSkips(logs), [logs])
 
   // Scrolls the terminal itself rather than calling scrollIntoView, which walks
   // every scrollable ancestor and would drag the drawer body along with it.
@@ -426,6 +563,7 @@ export default function Runs() {
           <div>
             {runs.map((run, i) => {
               const job = jobs.find(j => j.id === run.job_id)
+              const skips = skipsByRun.get(run.id)
               return (
                 <div
                   key={run.id}
@@ -436,8 +574,11 @@ export default function Runs() {
                 >
                   <StatusBadge status={run.status} className="w-16 shrink-0" />
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium truncate">
-                      {job?.name ?? <span className="font-mono text-muted-foreground">{run.job_id.slice(0, 8)}</span>}
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-sm font-medium truncate">
+                        {job?.name ?? <span className="font-mono text-muted-foreground">{run.job_id.slice(0, 8)}</span>}
+                      </span>
+                      {skips && <SkipBadge skips={skips} />}
                     </div>
                     <div className="text-xs text-muted-foreground">
                       {formatRelative(run.started_at)}
@@ -451,6 +592,18 @@ export default function Runs() {
                   <div className="text-xs text-muted-foreground shrink-0 hidden sm:block">
                     {run.finished_at ? formatDate(run.finished_at) : '—'}
                   </div>
+                  {isRestorable(run) && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                      onClick={(e) => { e.stopPropagation(); setRestoreTarget(run) }}
+                      title="Restore this backup"
+                      aria-label={`Restore backup from run ${run.id.slice(0, 8)}`}
+                    >
+                      <RotateCcw aria-hidden="true" className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
                   {run.status === 'running' && (
                     <Button
                       variant="ghost"
@@ -566,13 +719,46 @@ export default function Runs() {
                 </div>
               )}
 
+              {selectedSkips && <SkipPanel skips={selectedSkips} />}
+
               {!isRunning && (
-                <RestorePanel
-                  run={selectedRun}
-                  job={selectedJob}
-                  destination={selectedDestination}
-                  agent={selectedAgent}
-                />
+                <div className="shrink-0 space-y-2">
+                  {isRestorable(selectedRun) && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        size="sm"
+                        className="gap-1.5"
+                        onClick={() => setRestoreTarget(selectedRun)}
+                      >
+                        <RotateCcw aria-hidden="true" className="h-3.5 w-3.5" />
+                        Restore this backup…
+                      </Button>
+                      <span className="text-[11px] text-muted-foreground">
+                        Runs on {selectedAgent?.name ?? 'the agent host'}, which must be online.
+                      </span>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => setShowCliRestore(v => !v)}
+                    aria-expanded={showCliRestore}
+                    className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    <Terminal aria-hidden="true" className="h-3 w-3" />
+                    {showCliRestore ? 'Hide' : 'Show'} the command-line restore
+                    {isRestorable(selectedRun) && ' (works with the agent offline)'}
+                  </button>
+
+                  {showCliRestore && (
+                    <RestorePanel
+                      run={selectedRun}
+                      job={selectedJob}
+                      destination={selectedDestination}
+                      agent={selectedAgent}
+                    />
+                  )}
+                </div>
               )}
 
               {streamError && (
@@ -630,6 +816,21 @@ export default function Runs() {
           )}
         </SheetContent>
       </Sheet>
+
+      {/* Keyed on the run so every restore starts from a clean form rather than
+          inheriting the previous run's selection and destination. */}
+      {restoreTarget && (
+        <RestoreDialog
+          key={restoreTarget.id}
+          run={restoreTarget}
+          job={jobs.find(j => j.id === restoreTarget.job_id)}
+          agent={(() => {
+            const j = jobs.find(x => x.id === restoreTarget.job_id)
+            return j ? agents.find(a => a.id === j.agent_id) : undefined
+          })()}
+          onClose={() => setRestoreTarget(null)}
+        />
+      )}
     </div>
   )
 }

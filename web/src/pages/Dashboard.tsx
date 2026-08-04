@@ -1,16 +1,164 @@
 import { useQuery } from '@tanstack/react-query'
 import { useTheme } from 'next-themes'
+import { Link } from 'react-router-dom'
 import { api } from 'src/lib/api'
 import { StatusBadge } from 'src/components/StatusBadge'
+import { HealthBadge } from 'src/components/HealthBadge'
 import { Card, CardContent, CardHeader, CardTitle } from 'src/components/ui/card'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
-import { formatDate, formatBytes } from 'src/lib/utils'
-import { Server, Briefcase, CheckCircle2, XCircle } from 'lucide-react'
+import { formatDate, formatBytes, formatRelative } from 'src/lib/utils'
+import { healthLabel, isHealthProblem } from 'src/lib/health'
+import { AlertTriangle, Server, Briefcase, CheckCircle2, ShieldCheck, WifiOff, XCircle } from 'lucide-react'
 import { cn } from 'src/lib/utils'
+import type { HealthSummary, JobHealth, OpenAlert } from 'src/lib/types'
 
 /** Days of history the chart shows. The server generates one bucket per day. */
 const CHART_DAYS = 7
 const RECENT_RUNS = 10
+/** The dead-man's switch runs on its own interval; the panel just has to be no
+ *  more stale than a person staring at it would tolerate. */
+const HEALTH_POLL_MS = 30_000
+
+/** Human wording for the alert kinds in notify.AlertAgentOffline / AlertJobLate. */
+const ALERT_TITLES: Record<string, string> = {
+  agent_offline: 'Agent offline',
+  job_late: 'Backup overdue',
+}
+
+function alertTitle(alert: OpenAlert): string {
+  return ALERT_TITLES[alert.kind] ?? alert.kind.replace(/_/g, ' ')
+}
+
+/**
+ * The state of the backups, above everything else on the page.
+ *
+ * Open alerts come first and unconditionally: they are the conditions the
+ * dead-man's switch has already decided are worth waking somebody for, and until
+ * this panel existed the only place they were visible was an inbox. Under them
+ * sit the agents that are silent — an agent that stopped calling home is a
+ * backup that stopped happening, whatever its jobs claim.
+ */
+function HealthPanel({ health, isError }: { health: HealthSummary | undefined; isError: boolean }) {
+  if (isError) {
+    return (
+      <Card>
+        <CardContent className="py-4">
+          <p className="text-sm text-destructive">
+            Could not load backup health. The dead-man&apos;s switch may still be alerting by email.
+          </p>
+        </CardContent>
+      </Card>
+    )
+  }
+  if (!health) return null
+
+  const alerts = health.open_alerts
+  const offline = health.agents.items.filter(a => !a.online)
+  // An agent with no enabled job is not a problem to be silent about.
+  const offlineWithJobs = offline.filter(a => a.enabled_jobs > 0)
+  const problemJobs = (Object.entries(health.jobs.by_health) as [JobHealth, number][])
+    .filter(([h, n]) => n > 0 && isHealthProblem(h))
+
+  const allClear = alerts.length === 0 && offlineWithJobs.length === 0 && problemJobs.length === 0
+
+  return (
+    <Card className={cn(alerts.length > 0 && 'border-destructive/40')}>
+      <CardHeader className="pb-2">
+        <CardTitle className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          <span>Backup Health</span>
+          {allClear ? (
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium normal-case tracking-normal text-emerald-600 dark:text-emerald-400">
+              <ShieldCheck aria-hidden="true" className="h-3.5 w-3.5" />
+              Everything is up to date
+            </span>
+          ) : (
+            <span className="text-xs font-medium normal-case tracking-normal text-destructive">
+              {alerts.length > 0 && `${alerts.length} open alert${alerts.length === 1 ? '' : 's'}`}
+            </span>
+          )}
+          {health.thresholds.deadman_enabled === 'false' && (
+            <span className="text-xs font-normal normal-case tracking-normal text-amber-600 dark:text-amber-400">
+              Dead-man&apos;s switch disabled — nothing is watching for silence
+            </span>
+          )}
+        </CardTitle>
+      </CardHeader>
+
+      <CardContent className="space-y-4">
+        {/* ── Open alerts, first and loudest ─────────────────────────────── */}
+        {alerts.length > 0 && (
+          <div role="alert" className="rounded border border-destructive/30 bg-destructive/8 divide-y divide-destructive/15">
+            {alerts.map(alert => (
+              <div key={`${alert.subject_type}-${alert.subject_id}-${alert.kind}`} className="flex gap-2.5 px-3 py-2.5">
+                <AlertTriangle aria-hidden="true" className="h-4 w-4 text-destructive shrink-0 mt-px" />
+                <div className="min-w-0 space-y-0.5">
+                  <p className="text-sm font-medium text-destructive">{alertTitle(alert)}</p>
+                  <p className="text-xs text-foreground/80 break-words">{alert.detail}</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Open since {formatDate(alert.first_seen_at)} ({formatRelative(alert.first_seen_at)})
+                    {alert.notify_count > 0 && ` · notified ${alert.notify_count}×`}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── Agents that stopped calling home ───────────────────────────── */}
+        {offlineWithJobs.length > 0 && (
+          <div className="space-y-1.5">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Agents not reporting
+            </p>
+            <div className="rounded border border-border divide-y divide-border">
+              {offlineWithJobs.map(a => (
+                <div key={a.id} className="flex items-center gap-2.5 px-3 py-2">
+                  <WifiOff aria-hidden="true" className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                  <span className="text-sm font-medium truncate flex-1 min-w-0">{a.name}</span>
+                  <span className="text-xs text-muted-foreground shrink-0">
+                    {a.enabled_jobs} enabled job{a.enabled_jobs === 1 ? '' : 's'}
+                  </span>
+                  <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
+                    {a.last_seen ? `last seen ${formatRelative(a.last_seen)}` : 'never connected'}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              An agent counts as offline after {health.thresholds.agent_offline_after} without a heartbeat.
+            </p>
+          </div>
+        )}
+
+        {/* ── Job verdicts ───────────────────────────────────────────────── */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+          {problemJobs.length > 0 ? (
+            problemJobs.map(([h, n]) => (
+              <span key={h} className="inline-flex items-center gap-1.5 text-sm">
+                <HealthBadge health={h} />
+                <span className="text-muted-foreground text-xs">
+                  {n} job{n === 1 ? '' : 's'}
+                </span>
+              </span>
+            ))
+          ) : (
+            <span className="text-xs text-muted-foreground">
+              {health.jobs.total} job{health.jobs.total === 1 ? '' : 's'} tracked, none late or failing.
+            </span>
+          )}
+          <Link
+            to="/jobs"
+            className="text-xs font-medium text-muted-foreground hover:text-foreground underline underline-offset-2 ml-auto"
+          >
+            {problemJobs.length > 0
+              ? `Review ${problemJobs.map(([h]) => healthLabel(h).toLowerCase()).join(' and ')} jobs`
+              : 'Open jobs'}
+          </Link>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
 
 // ── Custom tooltip ────────────────────────────────────────────────────────────
 function ChartTooltip({ active, payload, label }: {
@@ -70,6 +218,12 @@ export default function Dashboard() {
     queryFn: ({ signal }) => api.listRuns({ limit: RECENT_RUNS, offset: 0 }, signal),
   })
 
+  const { data: health, isError: healthError } = useQuery({
+    queryKey: ['health'],
+    queryFn: ({ signal }) => api.getHealth(signal),
+    refetchInterval: HEALTH_POLL_MS,
+  })
+
   const onlineAgents = agents.filter(a => a.status === 'online').length
   const enabledJobs  = jobs.filter(j => j.enabled).length
 
@@ -103,6 +257,10 @@ export default function Dashboard() {
         <h2 className="font-sans font-bold text-2xl tracking-tight">Dashboard</h2>
         {(statsError || recentError) && <p className="text-xs text-destructive">Failed to load run data.</p>}
       </div>
+
+      {/* ── Health, above the counters: an open alert has to be the first
+             thing on the page, not something found by scrolling. ────────── */}
+      <HealthPanel health={health} isError={healthError} />
 
       {/* ── Stat grid ───────────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 border border-border rounded-lg overflow-hidden">

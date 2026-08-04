@@ -3,6 +3,7 @@ import type {
   Agent, BackupJob, BackupRun, StorageDestination,
   NotificationSettings, CreateJobRequest, CreateStorageRequest,
   EmailNotificationConfig, RunsPage, RunsQuery, RunLogs, RunStats,
+  JobListItem, HealthSummary, ArchiveListing, RestoreRequest, RestoreAccepted,
 } from './types'
 
 const LOGIN_PATH = '/login'
@@ -68,7 +69,10 @@ export const api = {
     request<void>('PUT', `/api/storage-destinations/${id}`, data),
   deleteStorage: (id: string) => request<void>('DELETE', `/api/storage-destinations/${id}`),
 
-  listJobs: (signal?: AbortSignal) => request<BackupJob[]>('GET', '/api/jobs', undefined, signal),
+  // The jobs list carries the derived health of every job (last run, next run,
+  // verdict, agent liveness). Create/update still take a plain CreateJobRequest:
+  // those fields are computed, never written.
+  listJobs: (signal?: AbortSignal) => request<JobListItem[]>('GET', '/api/jobs', undefined, signal),
   createJob: (data: CreateJobRequest) => request<BackupJob>('POST', '/api/jobs', data),
   updateJob: (id: string, data: CreateJobRequest) =>
     request<void>('PUT', `/api/jobs/${id}`, data),
@@ -96,6 +100,27 @@ export const api = {
 
   getRunStats: (days: number, signal?: AbortSignal) =>
     request<RunStats>('GET', `/api/runs/stats?days=${days}`, undefined, signal),
+
+  getHealth: (signal?: AbortSignal) =>
+    request<HealthSummary>('GET', '/api/health', undefined, signal),
+
+  /**
+   * Lists a run's archive without restoring it.
+   *
+   * The agent downloads and decrypts the whole file to answer, so this is a
+   * minutes-scale request on a large backup over a slow link — the server waits
+   * up to 5 minutes for the agent before giving up. It needs the agent online
+   * (409) and can fail in the agent (502).
+   */
+  listRunArchive: (id: string, signal?: AbortSignal) =>
+    request<ArchiveListing>('GET', `/api/runs/${id}/archive`, undefined, signal),
+
+  /**
+   * Dispatches a restore to the agent and returns as soon as it is handed off
+   * (202). The work itself reports on the run's own log stream.
+   */
+  startRestore: (id: string, body: RestoreRequest) =>
+    request<RestoreAccepted>('POST', `/api/runs/${id}/restore`, body),
 
   getNotificationSettings: (signal?: AbortSignal) =>
     request<NotificationSettings | { configured: false }>('GET', '/api/settings/notifications', undefined, signal),

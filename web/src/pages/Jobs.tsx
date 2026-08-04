@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api } from 'src/lib/api'
 import { ConfirmDialog } from 'src/components/ConfirmDialog'
+import { HealthBadge } from 'src/components/HealthBadge'
 import { Button } from 'src/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from 'src/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from 'src/components/ui/dialog'
@@ -10,11 +11,13 @@ import { Input } from 'src/components/ui/input'
 import { Label } from 'src/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from 'src/components/ui/select'
 import { Switch } from 'src/components/ui/switch'
-import { cronHumanize } from 'src/lib/utils'
-import { Plus, Trash2, Play, Pencil } from 'lucide-react'
+import { Textarea } from 'src/components/ui/textarea'
+import { cronHumanize, formatDate, formatRelative } from 'src/lib/utils'
+import { healthLabel, isHealthProblem } from 'src/lib/health'
+import { Plus, Trash2, Play, Pencil, WifiOff } from 'lucide-react'
 import { cn } from 'src/lib/utils'
 import { FileBrowser } from 'src/components/FileBrowser'
-import type { BackupJob, CreateJobRequest } from 'src/lib/types'
+import type { BackupJob, CreateJobRequest, JobHealth } from 'src/lib/types'
 
 const JOB_TYPES = ['files', 'postgres', 'mysql', 'sqlite', 'mongodb'] as const
 const COMPRESSIONS = ['zstd', 'gzip'] as const
@@ -40,6 +43,77 @@ const emptyForm = (): CreateJobRequest => ({
   encrypt: false,
   encrypt_passphrase: '',
 })
+
+/** Stable identity for "no patterns", so ExcludeField's sync effect can tell an
+ *  externally-changed list from a re-render of the same empty one. */
+const NO_EXCLUDES: string[] = []
+
+const EXCLUDE_PLACEHOLDER = ['node_modules', '*.log', '.cache/', '/var/www/*/dist'].join('\n')
+
+/**
+ * The exclusion patterns of a `files` job, one per line — the shape a sysadmin
+ * already writes them in.
+ *
+ * The textarea keeps its own text because the stored value is a `string[]`:
+ * round-tripping through `split('\n').filter(Boolean)` on every keystroke would
+ * eat the newline the moment it is typed.
+ */
+function ExcludeField({ value, onChange }: { value: string[]; onChange: (patterns: string[]) => void }) {
+  const [text, setText] = useState(() => value.join('\n'))
+  const pushed = useRef(value)
+
+  // Adopt a list set from outside (the dialog reopening on another job) without
+  // fighting the typing: anything we pushed up ourselves comes back identical.
+  useEffect(() => {
+    if (value !== pushed.current) {
+      pushed.current = value
+      setText(value.join('\n'))
+    }
+  }, [value])
+
+  function handle(next: string) {
+    setText(next)
+    // Blank lines are dropped here and also ignored by the agent, so a stray
+    // newline can never fail a nightly backup.
+    const parsed = next.split('\n').map(s => s.trim()).filter(Boolean)
+    pushed.current = parsed
+    onChange(parsed)
+  }
+
+  return (
+    <div className="space-y-1">
+      <Label htmlFor="job-exclude">
+        Exclude
+        <span className="ml-1.5 text-xs text-muted-foreground font-normal">(one pattern per line, optional)</span>
+      </Label>
+      <Textarea
+        id="job-exclude"
+        rows={4}
+        className="font-mono text-xs"
+        placeholder={EXCLUDE_PLACEHOLDER}
+        value={text}
+        onChange={e => handle(e.target.value)}
+        aria-describedby="job-exclude-help"
+      />
+      <div id="job-exclude-help" className="text-[11px] text-muted-foreground leading-relaxed space-y-1">
+        <p>
+          A subset of <code className="font-mono">.gitignore</code> syntax.{' '}
+          <span className="font-medium text-foreground">Negations (<code className="font-mono">!keep.log</code>) are
+          not supported</span> — an excluded directory is never even read, which is the point on trees like{' '}
+          <code className="font-mono">node_modules</code>.
+        </p>
+        <ul className="space-y-0.5">
+          <li><code className="font-mono text-foreground">node_modules</code> — any entry with that name, at any depth, and everything under it</li>
+          <li><code className="font-mono text-foreground">*.log</code> — matches on the name only, at any depth</li>
+          <li><code className="font-mono text-foreground">.cache/</code> — the trailing slash restricts it to directories</li>
+          <li><code className="font-mono text-foreground">www/*/dist</code> — a path fragment: matches that sequence of segments anywhere</li>
+          <li><code className="font-mono text-foreground">/var/www/*/dist</code> — leading slash: anchored to that absolute path</li>
+          <li><code className="font-mono text-foreground">**/dist</code> — <code className="font-mono">**</code> spans any number of segments</li>
+        </ul>
+      </div>
+    </div>
+  )
+}
 
 function SourceFields({
   type,
@@ -69,37 +143,61 @@ function SourceFields({
 
   if (type === 'files') {
     const paths = Array.isArray(source['paths']) ? (source['paths'] as string[]) : []
+    const exclude = Array.isArray(source['exclude']) ? (source['exclude'] as string[]) : NO_EXCLUDES
+
+    // The exclusion patterns live inside `source` next to `paths`, so every
+    // writer here has to spread the existing source rather than replace it —
+    // dropping the object wholesale used to wipe them on any path edit.
+    const excludeField = (
+      <ExcludeField
+        value={exclude}
+        onChange={patterns => {
+          // An empty list is dropped rather than sent as [], so the stored JSON
+          // of a job with no exclusions stays byte-identical to what it was
+          // before the field existed (the Go struct has `omitempty`).
+          const { exclude: _dropped, ...rest } = source
+          onChange(patterns.length > 0 ? { ...rest, exclude: patterns } : rest)
+        }}
+      />
+    )
 
     if (agentId && agentOnline) {
       return (
-        <div className="space-y-1.5">
-          <Label>Source Paths</Label>
-          <FileBrowser
-            agentId={agentId}
-            selectedPaths={paths}
-            onChange={newPaths => onChange({ paths: newPaths })}
-          />
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label>Source Paths</Label>
+            <FileBrowser
+              agentId={agentId}
+              selectedPaths={paths}
+              onChange={newPaths => onChange({ ...source, paths: newPaths })}
+            />
+          </div>
+          {excludeField}
         </div>
       )
     }
 
     // Fallback: plain text input when no agent selected or offline
     return (
-      <div className="space-y-1">
-        <Label>
-          Source Paths
-          <span className="ml-1.5 text-xs text-muted-foreground font-normal">
-            {agentId && !agentOnline ? '(agent offline — enter manually)' : '(comma-separated)'}
-          </span>
-        </Label>
-        <Input
-          value={paths.join(', ')}
-          placeholder="/home/user/documents, /var/data"
-          onChange={e => {
-            const arr = e.target.value.split(',').map(s => s.trim()).filter(Boolean)
-            onChange({ paths: arr })
-          }}
-        />
+      <div className="space-y-4">
+        <div className="space-y-1">
+          <Label htmlFor="job-paths">
+            Source Paths
+            <span className="ml-1.5 text-xs text-muted-foreground font-normal">
+              {agentId && !agentOnline ? '(agent offline — enter manually)' : '(comma-separated)'}
+            </span>
+          </Label>
+          <Input
+            id="job-paths"
+            value={paths.join(', ')}
+            placeholder="/home/user/documents, /var/data"
+            onChange={e => {
+              const arr = e.target.value.split(',').map(s => s.trim()).filter(Boolean)
+              onChange({ ...source, paths: arr })
+            }}
+          />
+        </div>
+        {excludeField}
       </div>
     )
   }
@@ -124,6 +222,9 @@ export default function Jobs() {
   const { data: jobs = [], isLoading, isError } = useQuery({
     queryKey: ['jobs'],
     queryFn: ({ signal }) => api.listJobs(signal),
+    // Health is derived per request from clock-dependent thresholds: a job goes
+    // "late" while nobody touches the page, so the page has to keep asking.
+    refetchInterval: 30_000,
   })
   const { data: agents = [] } = useQuery({ queryKey: ['agents'], queryFn: ({ signal }) => api.listAgents(signal) })
   const { data: storage = [] } = useQuery({ queryKey: ['storage'], queryFn: ({ signal }) => api.listStorage(signal) })
@@ -239,6 +340,21 @@ export default function Jobs() {
 
   const isPending = createMut.isPending || updateMut.isPending
 
+  // "Is everything up to date?" answered above the list, so nobody has to read
+  // every row to find the one that stopped running three days ago.
+  const problems = useMemo(() => {
+    const counts = new Map<JobHealth, number>()
+    for (const job of jobs) {
+      if (isHealthProblem(job.health)) counts.set(job.health, (counts.get(job.health) ?? 0) + 1)
+    }
+    return [...counts.entries()]
+  }, [jobs])
+
+  const offlineAgents = useMemo(
+    () => new Set(jobs.filter(j => j.enabled && !j.agent_online).map(j => j.agent_id)).size,
+    [jobs],
+  )
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -251,9 +367,27 @@ export default function Jobs() {
 
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-            Jobs
-            {jobs.length > 0 && <span className="ml-2 text-xs font-normal normal-case">({jobs.length})</span>}
+          <CardTitle className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+            <span>
+              Jobs
+              {jobs.length > 0 && <span className="ml-2 text-xs font-normal normal-case">({jobs.length})</span>}
+            </span>
+            {jobs.length > 0 && (
+              problems.length === 0 ? (
+                <span className="text-xs font-medium normal-case tracking-normal text-emerald-600 dark:text-emerald-400">
+                  All up to date
+                </span>
+              ) : (
+                <span className="text-xs font-medium normal-case tracking-normal text-destructive">
+                  {problems.map(([health, n]) => `${n} ${healthLabel(health).toLowerCase()}`).join(' · ')}
+                </span>
+              )
+            )}
+            {offlineAgents > 0 && (
+              <span className="text-xs font-medium normal-case tracking-normal text-amber-600 dark:text-amber-400">
+                {offlineAgents} agent{offlineAgents === 1 ? '' : 's'} offline
+              </span>
+            )}
           </CardTitle>
         </CardHeader>
         <CardContent className="px-0">
@@ -288,12 +422,51 @@ export default function Jobs() {
                     <div className={cn('text-sm font-medium truncate', !job.enabled && 'text-muted-foreground')}>
                       {job.name}
                     </div>
-                    <div className="text-xs text-muted-foreground">
+                    <div className="text-xs text-muted-foreground truncate">
                       {job.type} · {agent?.name ?? job.agent_id.slice(0, 8)} · {dest?.name ?? '—'} · {cronHumanize(job.schedule_cron)}
+                    </div>
+                    {/* The two dates that answer "is this job actually running?" */}
+                    <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                      <span>
+                        Last:{' '}
+                        {job.last_run ? (
+                          <span
+                            className={cn(
+                              'font-medium',
+                              job.last_run.status === 'failed' && 'text-destructive',
+                              job.last_run.status === 'success' && 'text-foreground',
+                            )}
+                            title={job.last_run.error_message ?? undefined}
+                          >
+                            {formatRelative(job.last_run.started_at)} · {job.last_run.status}
+                          </span>
+                        ) : (
+                          <span className="font-medium">never</span>
+                        )}
+                      </span>
+                      <span>
+                        Next:{' '}
+                        <span className="font-medium">
+                          {job.next_run ? formatDate(job.next_run) : job.enabled ? 'not scheduled' : 'disabled'}
+                        </span>
+                      </span>
+                      {!job.agent_online && (
+                        <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400 font-medium">
+                          <WifiOff aria-hidden="true" className="h-3 w-3" />
+                          agent offline
+                          {job.agent_last_seen && ` · last seen ${formatRelative(job.agent_last_seen)}`}
+                        </span>
+                      )}
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                  <HealthBadge
+                    health={job.health}
+                    detail={job.health_detail}
+                    className="w-28 justify-start shrink-0 hidden sm:inline-flex"
+                  />
+
+                  <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0">
                     <Button
                       variant="ghost"
                       size="icon"
@@ -301,14 +474,29 @@ export default function Jobs() {
                       onClick={() => triggerMut.mutate(job.id)}
                       disabled={triggerMut.isPending}
                       title="Run now"
+                      aria-label={`Run "${job.name}" now`}
                     >
-                      <Play className="h-3.5 w-3.5" />
+                      <Play aria-hidden="true" className="h-3.5 w-3.5" />
                     </Button>
-                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(job)} title="Edit">
-                      <Pencil className="h-3.5 w-3.5" />
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => openEdit(job)}
+                      title="Edit"
+                      aria-label={`Edit "${job.name}"`}
+                    >
+                      <Pencil aria-hidden="true" className="h-3.5 w-3.5" />
                     </Button>
-                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setDeleteTarget(job)} title="Delete">
-                      <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => setDeleteTarget(job)}
+                      title="Delete"
+                      aria-label={`Delete "${job.name}"`}
+                    >
+                      <Trash2 aria-hidden="true" className="h-3.5 w-3.5 text-destructive" />
                     </Button>
                   </div>
                 </div>
@@ -326,8 +514,8 @@ export default function Jobs() {
           </DialogHeader>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-1">
-              <Label>Job Name</Label>
-              <Input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="My Backup" />
+              <Label htmlFor="job-name">Job Name</Label>
+              <Input id="job-name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="My Backup" />
             </div>
 
             <div className="space-y-1">
@@ -410,8 +598,9 @@ export default function Jobs() {
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
-                <Label>Retention (days)</Label>
+                <Label htmlFor="job-retention">Retention (days)</Label>
                 <Input
+                  id="job-retention"
                   type="number"
                   min={1}
                   value={form.retention_days}
@@ -441,8 +630,9 @@ export default function Jobs() {
 
             {form.encrypt && (
               <div className="space-y-1">
-                <Label>Passphrase</Label>
+                <Label htmlFor="job-passphrase">Passphrase</Label>
                 <Input
+                  id="job-passphrase"
                   type="password"
                   autoComplete="new-password"
                   value={form.encrypt_passphrase ?? ''}

@@ -11,6 +11,10 @@ import (
 )
 
 // A syntactically valid AES-256 key: 64 hex chars decoding to 32 bytes.
+//
+// Deliberately an obvious dummy. Reusing a key that was ever real — even one already
+// known to be compromised — spreads it into more files and outlives any attempt to
+// purge it from history.
 const testEncryptionKey = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 
 func setEnv(t *testing.T, pairs ...string) func() {
