@@ -77,7 +77,11 @@ React + TypeScript (Vite, shadcn/ui, React Router v6, next-themes). Pages: Dashb
 
 ### Real-time run logs
 
-`GET /api/runs/{id}/logs/ws` upgrades to WebSocket. The hub maintains a pub/sub map (`logSubs`) keyed by `run_id`; `AgentHandler` calls `hub.BroadcastRunLog` as progress messages arrive. Completed runs replay stored logs from DB.
+`GET /api/runs/{id}/logs/ws` upgrades to WebSocket. The hub maintains a pub/sub map (`logSubs`) keyed by `run_id`; `AgentHandler` calls `hub.BroadcastRunLog` as progress messages arrive.
+
+Because browsers cannot set an `Authorization` header on a WebSocket handshake, this route and `/ws/console` authenticate via `?token=<jwt>`; `jwtAuthMiddleware` accepts the query form **only** on WebSocket routes (see `isWebSocketRoute`).
+
+There is **no log persistence**: no logs table exists, so a completed run has nothing to replay. `GET /api/runs/{id}/logs` returns only `{run_id, status, message}`. Live logs are available solely while the run is in progress.
 
 ### Server console stream
 

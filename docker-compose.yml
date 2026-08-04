@@ -1,19 +1,24 @@
 services:
   postgres:
     image: postgres:16
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: nat_backup
-      POSTGRES_USER: nat_backup
-      POSTGRES_PASSWORD: nat_backup_dev
+      POSTGRES_DB: ${POSTGRES_DB:-nat_backup}
+      POSTGRES_USER: ${POSTGRES_USER:-nat_backup}
+      # Development-only default. Override with POSTGRES_PASSWORD in your
+      # environment (or a local .env) for anything that is not localhost dev.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nat_backup_dev}
     ports:
-      - "5432:5432"
+      # Bound to loopback only: never expose a dev database on 0.0.0.0.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nat_backup"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nat_backup} -d ${POSTGRES_DB:-nat_backup}"]
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
 volumes:
   pgdata:

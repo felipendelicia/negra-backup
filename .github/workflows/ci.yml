@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  # Reused by release.yml so a tag can never be published without these checks.
+  workflow_call:
+
+permissions:
+  contents: read
+
+# Only the newest run per ref matters; cancel superseded ones.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+
+    # internal/db tests hit a real Postgres (they skip only under -short).
+    # Credentials mirror docker-compose.yml so the local and CI DSNs match.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: nat_backup
+          POSTGRES_USER: nat_backup
+          POSTGRES_PASSWORD: nat_backup_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nat_backup -d nat_backup"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Kept in sync with the `go` directive in go.mod (1.25.0).
+          go-version-file: go.mod
+          cache: true
+
+      # NOTE: the `./...` pattern would also match web/node_modules, which ships
+      # Go sources (the `flatted` package). Always scope to ./cmd/... ./internal/...
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal ./migrations)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-formatted. Run 'make fmt' to fix:"
+            echo "$unformatted"
+            gofmt -d ./cmd ./internal ./migrations
+            exit 1
+          fi
+          echo "All Go files are gofmt-clean."
+
+      - name: Build
+        run: go build ./cmd/... ./internal/...
+
+      - name: Vet
+        run: go vet ./cmd/... ./internal/...
+
+      - name: Test (race detector)
+        env:
+          DATABASE_URL: postgres://nat_backup:nat_backup_dev@localhost:5432/nat_backup?sslmode=disable
+        run: go test -race ./cmd/... ./internal/...
+
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build

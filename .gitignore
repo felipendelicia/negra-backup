@@ -3,6 +3,13 @@ bin/
 *.exe
 *.out
 
+# Compiled binaries produced by `go build` in the repo root
+/agent
+/server
+/migrate
+/nat-backup-server
+/nat-backup-agent
+
 # Environment — never commit real secrets
 .env
 
