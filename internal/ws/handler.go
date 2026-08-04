@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/felipendelicia/nat-backup/internal/models"
 	"github.com/gorilla/websocket"
 	"github.com/jmoiron/sqlx"
 	"golang.org/x/crypto/bcrypt"
@@ -155,7 +156,7 @@ func (h *AgentHandler) handleAgentMessage(agentID string, msg AgentMessage) {
 				log.Printf("db update run success %s: %v", msg.RunID, err)
 			}
 		}
-		h.hub.BroadcastRunLog(msg.RunID, "completed: "+msg.StoragePath)
+		h.recordRunLog(msg.RunID, "completed: "+msg.StoragePath)
 
 	case MsgTypeJobFailed:
 		if h.db != nil {
@@ -171,7 +172,7 @@ func (h *AgentHandler) handleAgentMessage(agentID string, msg AgentMessage) {
 				log.Printf("db update run failed %s: %v", msg.RunID, err)
 			}
 		}
-		h.hub.BroadcastRunLog(msg.RunID, "failed: "+msg.Error)
+		h.recordRunLog(msg.RunID, "failed: "+msg.Error)
 		go h.notifyFailure(msg.RunID, msg.Error)
 	}
 }
@@ -204,11 +205,35 @@ func (h *AgentHandler) notifyFailure(runID, errMsg string) {
 	}
 }
 
+// authenticateAPIKey resolves an agent key to its agent id.
+//
+// Keys carrying a public identifier are looked up directly, costing a single bcrypt
+// verification. Keys issued before that scheme fall back to scanning every row and
+// hashing against each one — the original behaviour, which made one unauthenticated
+// handshake cost N bcrypt operations and degraded with every agent added. The
+// fallback exists only so existing deployments keep working; regenerating the key
+// moves that agent onto the indexed path.
 func (h *AgentHandler) authenticateAPIKey(apiKey string) (string, error) {
 	if h.db == nil {
 		return "test-agent-id", nil
 	}
-	rows, err := h.db.Query(`SELECT id, api_key FROM agents`)
+
+	if keyID, secret, ok := models.ParseAPIKey(apiKey); ok {
+		var id, hash string
+		err := h.db.QueryRow(
+			`SELECT id, api_key FROM agents WHERE api_key_id = $1`, keyID).Scan(&id, &hash)
+		if err != nil {
+			// Do not fall through to the scan: a prefixed key with no matching row is
+			// simply invalid, and scanning would hand back the DoS this avoids.
+			return "", fmt.Errorf("invalid api key")
+		}
+		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(secret)) != nil {
+			return "", fmt.Errorf("invalid api key")
+		}
+		return id, nil
+	}
+
+	rows, err := h.db.Query(`SELECT id, api_key FROM agents WHERE api_key_id IS NULL`)
 	if err != nil {
 		return "", fmt.Errorf("db query: %w", err)
 	}
@@ -227,4 +252,24 @@ func (h *AgentHandler) authenticateAPIKey(apiKey string) (string, error) {
 		return "", fmt.Errorf("rows error: %w", err)
 	}
 	return "", fmt.Errorf("invalid api key")
+}
+
+// recordRunLog persists a log line for a run and broadcasts it to any watchers.
+//
+// Run logs were previously broadcast and dropped, so a finished run had nothing to
+// show and the UI fabricated cosmetic lines from the run's status. Persisting them
+// is what makes a failure diagnosable after the fact.
+//
+// Progress ticks are deliberately NOT routed through here: they are high-frequency
+// and worthless once the run is over, so they stay broadcast-only.
+func (h *AgentHandler) recordRunLog(runID, line string) {
+	h.hub.BroadcastRunLog(runID, line)
+	if h.db == nil {
+		return
+	}
+	if _, err := h.db.Exec(
+		`INSERT INTO run_logs (run_id, line) VALUES ($1, $2)`, runID, line); err != nil {
+		// A log line that cannot be stored must not fail the run it describes.
+		log.Printf("persist run log %s: %v", runID, err)
+	}
 }

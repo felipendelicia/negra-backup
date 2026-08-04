@@ -19,6 +19,18 @@ const (
 // TarCompress creates a tar archive of all paths, compressed with the given algorithm.
 // Writes to w. Returns total uncompressed bytes read and any error.
 func TarCompress(paths []string, w io.Writer, compression string) (totalBytes int64, err error) {
+	return TarCompressProgress(paths, w, compression, nil)
+}
+
+// TarCompressProgress is TarCompress with progress reporting. The walk is the only
+// place that knows which file is being written and how many of its bytes have gone
+// through, so onProgress is fed from here; it is called once per write chunk of the
+// file in flight and once when that file completes. Throttling is the caller's job
+// (see progressReporter).
+//
+// A nil onProgress restores the exact original code path: no closure, no wrapper
+// writer, no per-chunk call.
+func TarCompressProgress(paths []string, w io.Writer, compression string, onProgress TarProgressFunc) (totalBytes int64, err error) {
 	var compWriter io.WriteCloser
 
 	switch compression {
@@ -35,6 +47,8 @@ func TarCompress(paths []string, w io.Writer, compression string) (totalBytes in
 	}
 
 	tw := tar.NewWriter(compWriter)
+
+	var filesDone int
 
 	for _, root := range paths {
 		if walkErr := filepath.WalkDir(root, func(p string, d os.DirEntry, werr error) error {
@@ -62,11 +76,42 @@ func TarCompress(paths []string, w io.Writer, compression string) (totalBytes in
 			}
 
 			if !d.IsDir() {
-				n, err := copyFile(tw, p)
+				var onChunk func(int64)
+				if onProgress != nil {
+					// Captured by value: totalBytes/filesDone are the state *before*
+					// this file, so the report is consistent even mid-copy.
+					var (
+						bytesBefore = totalBytes
+						doneBefore  = filesDone
+						size        = info.Size()
+					)
+					onChunk = func(written int64) {
+						onProgress(TarProgress{
+							FilesDone:      doneBefore,
+							CurrentFile:    p,
+							CurrentDone:    written,
+							CurrentSize:    size,
+							TotalBytesDone: bytesBefore + written,
+						})
+					}
+				}
+
+				n, err := copyFile(tw, p, onChunk)
 				if err != nil {
 					return err
 				}
 				totalBytes += n
+				filesDone++
+
+				if onProgress != nil {
+					// File completed: it now counts in FilesDone, so the
+					// current-file fields are cleared to avoid double-counting.
+					onProgress(TarProgress{
+						FilesDone:      filesDone,
+						CurrentFile:    p,
+						TotalBytesDone: totalBytes,
+					})
+				}
 			}
 
 			return nil
@@ -91,14 +136,20 @@ func TarCompress(paths []string, w io.Writer, compression string) (totalBytes in
 }
 
 // copyFile copies a single file into the tar writer, closing the file after.
-func copyFile(tw *tar.Writer, path string) (int64, error) {
+// onChunk, when non-nil, receives the running byte count after every write.
+func copyFile(tw *tar.Writer, path string, onChunk func(written int64)) (int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
 
-	n, err := io.Copy(tw, f)
+	var dst io.Writer = tw
+	if onChunk != nil {
+		dst = &progressWriter{w: tw, onWrite: onChunk}
+	}
+
+	n, err := io.Copy(dst, f)
 	if err != nil {
 		return n, fmt.Errorf("copy %s: %w", path, err)
 	}

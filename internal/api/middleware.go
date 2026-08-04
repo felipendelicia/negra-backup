@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/felipendelicia/nat-backup/internal/models"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -66,7 +67,25 @@ func (s *Server) agentAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		rows, err := s.db.Query(`SELECT id, api_key FROM agents`)
+		// Keys with a public identifier resolve to one row and one bcrypt check.
+		// See ws.AgentHandler.authenticateAPIKey for why the fallback below exists.
+		if keyID, secret, ok := models.ParseAPIKey(apiKey); ok {
+			var id, hash string
+			if err := s.db.QueryRow(
+				`SELECT id, api_key FROM agents WHERE api_key_id = $1`, keyID).Scan(&id, &hash); err != nil {
+				respondError(w, http.StatusUnauthorized, "invalid api key")
+				return
+			}
+			if bcrypt.CompareHashAndPassword([]byte(hash), []byte(secret)) != nil {
+				respondError(w, http.StatusUnauthorized, "invalid api key")
+				return
+			}
+			ctx := context.WithValue(r.Context(), contextKeyAgentID, id)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		rows, err := s.db.Query(`SELECT id, api_key FROM agents WHERE api_key_id IS NULL`)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "db error")
 			return

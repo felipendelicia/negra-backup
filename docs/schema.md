@@ -27,11 +27,12 @@ files; the "written values" notes cite the Go code that produces them.
 |--------|------|------|---------|-------|
 | `id` | UUID | NOT NULL | `uuid_generate_v4()` | PRIMARY KEY |
 | `name` | TEXT | NOT NULL | — | |
-| `api_key` | TEXT | NOT NULL | — | UNIQUE. Stores the **bcrypt hash**, never the plaintext key (`internal/api/agents.go`, `generateAPIKey`) |
+| `api_key` | TEXT | NOT NULL | — | UNIQUE. Stores the **bcrypt hash** of the secret half, never the plaintext key (`internal/api/agents.go`, `generateAPIKey`) |
 | `os` | TEXT | NOT NULL | `''` | Reported by the agent in its `hello` message |
 | `arch` | TEXT | NOT NULL | `''` | Reported by the agent in its `hello` message |
 | `version` | TEXT | NOT NULL | `''` | Agent binary version |
 | `last_seen` | TIMESTAMPTZ | NULL | — | Updated on `hello` and on every heartbeat (30 s) |
+| `api_key_id` | TEXT | NULL | — | Public identifier half of `natb_<key_id>_<secret>` keys (migration 003). NULL for keys issued earlier, which authenticate through the legacy scan |
 | `status` | TEXT | NOT NULL | `'offline'` | |
 | `created_at` | TIMESTAMPTZ | NOT NULL | `NOW()` | |
 
@@ -175,6 +176,25 @@ Email config shape (`models.EmailNotificationConfig`):
 
 ---
 
+## `run_logs`
+
+Added by migration 003. Persists a run's log lines so a finished run can be
+inspected after the fact; previously the lines were broadcast to connected browsers
+and dropped.
+
+| Column | Type | Nullable | Default | Notes |
+|--------|------|----------|---------|-------|
+| `id` | `BIGSERIAL` | not null | sequence | Primary key; also the ordering key |
+| `run_id` | `UUID` | not null | — | FK to `backup_runs(id)` `ON DELETE CASCADE` |
+| `logged_at` | `TIMESTAMPTZ` | not null | `NOW()` | |
+| `line` | `TEXT` | not null | — | |
+
+Only terminal events are stored (`completed: ...`, `failed: ...`). Progress ticks
+are broadcast but not persisted: they are high-frequency and meaningless once the
+run is over.
+
+---
+
 ## `admin_users`
 
 | Column | Type | Null | Default | Notes |
@@ -218,18 +238,27 @@ CREATE INDEX idx_backup_runs_started_at ON backup_runs(started_at);
 Implicit indexes from UNIQUE constraints: `agents(api_key)` and
 `admin_users(username)`.
 
-### Recommended indexes (not present)
+### Indexes added by migration 003
 
 | Index | Why |
 |-------|-----|
-| `backup_jobs(agent_id)` | FK with `ON DELETE CASCADE` and no index. Every agent delete does a sequential scan of `backup_jobs`, and `scheduler`/`notifyFailure` join on it |
-| `backup_jobs(storage_destination_id)` | FK with no index. Every storage-destination delete scans `backup_jobs` to check the constraint |
-| `backup_runs(job_id, started_at DESC)` | `handleListRuns` filters by `job_id` and always sorts `ORDER BY started_at DESC LIMIT 100`. The two single-column indexes cannot serve both steps at once |
+| `backup_jobs(agent_id)` | FK with `ON DELETE CASCADE` and no index. Every agent delete did a sequential scan of `backup_jobs`, and `scheduler`/`notifyFailure` join on it |
+| `backup_jobs(storage_destination_id)` | FK with no index. Every storage-destination delete scanned `backup_jobs` to check the constraint |
+| `backup_runs(job_id, started_at DESC)` | `handleListRuns` filters by `job_id` and sorts `ORDER BY started_at DESC`. The two single-column indexes could not serve both steps at once |
+| `run_logs(run_id, id)` | Reading a run's log is always "every line for this run, in order" |
+| `agents(api_key_id)` UNIQUE, partial `WHERE api_key_id IS NOT NULL` | Lets authentication find the one candidate row instead of scanning |
 
-`agents(api_key)` already has a UNIQUE index, but it cannot help authentication:
-`AgentHandler.authenticateAPIKey` selects **every** row and bcrypt-compares the
-presented key against each hash, so agent login is O(n) full scans plus one bcrypt
-per agent.
+`agents(api_key)` has a UNIQUE index that never helped authentication: the presented
+key is compared against a bcrypt hash, which is not something an index can look up.
+Authentication used to select **every** row and bcrypt-compare against each hash, so
+one unauthenticated handshake cost N bcrypt operations and got slower with every
+agent added.
+
+Keys issued since migration 003 have the form `natb_<key_id>_<secret>`. The
+identifier is public and indexed, so the row is found directly and exactly one hash
+is verified. Keys issued earlier have `api_key_id IS NULL` and still authenticate
+through the scan, which is now restricted to those rows; regenerating an agent's key
+moves it onto the indexed path.
 
 ---
 
@@ -239,18 +268,18 @@ Recorded here because they need a migration or a code change, which is out of
 scope for this document.
 
 1. **`backup_runs.status` and every other enum-like column are unconstrained.**
-   The database accepts any string. `models` only declares `RunStatusRunning`,
-   `RunStatusSuccess` and `RunStatusFailed`; there is no `RunStatusCancelled`
-   constant even though `internal/api/runs.go` writes the literal `'cancelled'`
-   and `web/src/lib/types.ts` renders it. A future migration adding a CHECK
-   constraint must include `cancelled`, or cancelling a run will start failing.
-2. **`notification_settings.config` is TEXT but plaintext.** It shares a column
-   type with `storage_destinations.config`, which is ciphertext, so the two look
-   identical in the database while only one is protected.
-3. **There is no `run_logs` table.** Run log lines are broadcast in memory only
-   (`Hub.logSubs`); nothing persists them. `GET /api/runs/{id}/logs` returns just
-   `{run_id, status, message}` from the run row, and
-   `GET /api/runs/{id}/logs/ws` closes immediately unless the run is still
-   `running`. Historical logs cannot be replayed.
-4. **`backup_jobs.source` and `notification_settings.config` hold secrets in
-   plaintext** (database connection strings and the SMTP password respectively).
+   The database accepts any string. `models` now declares `RunStatusCancelled`
+   alongside the other three, so the literal written by `internal/api/runs.go` has
+   a constant. A future migration adding a CHECK constraint must include
+   `cancelled`, or cancelling a run will start failing.
+2. ~~**`notification_settings.config` is TEXT but plaintext.**~~ Resolved: the
+   column now holds AES-256-GCM ciphertext, like `storage_destinations.config`.
+   Rows written before that change are still plaintext and are read transparently;
+   saving the settings again encrypts them.
+3. ~~**There is no `run_logs` table.**~~ Resolved by migration 003. Terminal
+   events are persisted and `GET /api/runs/{id}/logs` returns them in `lines`.
+   Progress ticks are deliberately not stored: they are high-frequency and
+   worthless once the run has finished, so they stay broadcast-only.
+4. **`backup_jobs.source` holds secrets in plaintext** — database connection
+   strings, including their passwords. Unlike storage configs and backup
+   passphrases, it is neither encrypted nor redacted by the API.

@@ -72,7 +72,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	plainKey, hash, err := generateAPIKey()
+	plainKey, keyID, hash, err := generateAPIKey()
 	if err != nil {
 		log.Printf("handleCreateAgent: generateAPIKey: %v", err)
 		respondError(w, http.StatusInternalServerError, "internal server error")
@@ -81,8 +81,9 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 
 	var agent models.Agent
 	err = s.db.QueryRowx(
-		`INSERT INTO agents (name, api_key, status) VALUES ($1, $2, 'offline') RETURNING id, name, os, arch, version, last_seen, status, created_at`,
-		req.Name, hash,
+		`INSERT INTO agents (name, api_key, api_key_id, status) VALUES ($1, $2, $3, 'offline')
+		 RETURNING id, name, os, arch, version, last_seen, status, created_at`,
+		req.Name, hash, keyID,
 	).StructScan(&agent)
 	if err != nil {
 		log.Printf("handleCreateAgent: %v", err)
@@ -152,14 +153,30 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// generateAPIKey creates a random 32-byte hex API key and its bcrypt hash.
-func generateAPIKey() (plaintext, hash string, err error) {
-	raw := make([]byte, 32)
-	if _, err = rand.Read(raw); err != nil {
+// generateAPIKey returns the key handed to the agent, its public identifier, and
+// the bcrypt hash of the secret half.
+//
+// The key looks like "natb_<keyID>_<secret>". The identifier is public and indexed,
+// so authentication finds the single matching row and verifies exactly one hash.
+// Keys used to be an opaque blob, which forced a scan of the whole agents table
+// running bcrypt per row — a handshake cost N hashes and got slower with every
+// agent, which is a CPU exhaustion vector for an unauthenticated endpoint.
+func generateAPIKey() (plaintext, keyID, hash string, err error) {
+	idRaw := make([]byte, 8)
+	if _, err = rand.Read(idRaw); err != nil {
 		return
 	}
-	plaintext = hex.EncodeToString(raw)
-	h, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
+	secretRaw := make([]byte, 32)
+	if _, err = rand.Read(secretRaw); err != nil {
+		return
+	}
+
+	keyID = hex.EncodeToString(idRaw)
+	secret := hex.EncodeToString(secretRaw)
+	plaintext = models.APIKeyPrefix + keyID + "_" + secret
+
+	// Only the secret half is hashed: the identifier is not a credential.
+	h, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
 	if err != nil {
 		return
 	}

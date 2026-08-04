@@ -79,7 +79,7 @@ func main() {
 	// The notifier reads its configuration per alert rather than being frozen with
 	// whatever was in the database at boot. Snapshotting it here meant a fresh
 	// install never sent anything and UI changes needed a restart to take effect.
-	notifier := notify.NewDBNotifier(pool)
+	notifier := notify.NewDBNotifierWithKey(pool, cfg.EncryptionKey)
 	agentHandler.SetFailureNotifier(notifier)
 
 	// Start daily retention cleanup.

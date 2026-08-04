@@ -6,7 +6,10 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/felipendelicia/nat-backup/internal/crypto"
 	"github.com/felipendelicia/nat-backup/internal/models"
+	"github.com/felipendelicia/nat-backup/internal/notify"
+	"github.com/google/uuid"
 )
 
 // redactedPasswordSentinel is echoed to the UI in place of the stored SMTP
@@ -14,27 +17,51 @@ import (
 const redactedPasswordSentinel = "__stored__"
 
 func (s *Server) handleGetNotificationSettings(w http.ResponseWriter, r *http.Request) {
-	var settings models.NotificationSettings
-	err := s.db.Get(&settings, `SELECT id, type, config FROM notification_settings LIMIT 1`)
-	if err != nil {
+	var row struct {
+		ID     uuid.UUID `db:"id"`
+		Type   string    `db:"type"`
+		Config string    `db:"config"`
+	}
+	if err := s.db.Get(&row, `SELECT id, type, config FROM notification_settings LIMIT 1`); err != nil {
 		respond(w, http.StatusOK, map[string]any{"configured": false})
 		return
 	}
 
-	// The SMTP password used to be returned verbatim, so every visit to the
-	// settings page shipped the mail credential to the browser and echoed it back
-	// on save. Replace it with a sentinel; the update handler restores the stored
-	// value when it sees it.
-	var cfg map[string]any
-	if err := json.Unmarshal(settings.Config, &cfg); err == nil {
-		if pw, ok := cfg["password"].(string); ok && pw != "" {
-			cfg["password"] = redactedPasswordSentinel
-			if redacted, err := json.Marshal(cfg); err == nil {
-				settings.Config = redacted
-			}
-		}
+	// The config is stored encrypted (with a fallback for rows written before that
+	// was true), so it has to be decrypted before anything can be read out of it.
+	config, err := notify.DecryptSettingsConfig(s.cfg.EncryptionKey, row.Config)
+	if err != nil {
+		log.Printf("handleGetNotificationSettings: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
 	}
-	respond(w, http.StatusOK, settings)
+
+	respond(w, http.StatusOK, models.NotificationSettings{
+		ID:     row.ID,
+		Type:   row.Type,
+		Config: redactPassword(config),
+	})
+}
+
+// redactPassword replaces the stored SMTP password with a sentinel. The password used
+// to be returned verbatim, so every visit to the settings page shipped the mail
+// credential to the browser and echoed it back on save; the update handler restores
+// the stored value when it sees the sentinel.
+func redactPassword(config json.RawMessage) json.RawMessage {
+	var cfg map[string]any
+	if err := json.Unmarshal(config, &cfg); err != nil {
+		return config
+	}
+	pw, ok := cfg["password"].(string)
+	if !ok || pw == "" {
+		return config
+	}
+	cfg["password"] = redactedPasswordSentinel
+	redacted, err := json.Marshal(cfg)
+	if err != nil {
+		return config
+	}
+	return redacted
 }
 
 func (s *Server) handleUpdateNotificationSettings(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +81,15 @@ func (s *Server) handleUpdateNotificationSettings(w http.ResponseWriter, r *http
 		respondError(w, http.StatusBadRequest, "invalid config")
 		return
 	}
-	body.Config = config
+
+	// SMTP credentials get the same treatment as storage credentials and backup
+	// passphrases: AES-256-GCM at rest, never plaintext in the database.
+	encConfig, err := crypto.Encrypt(s.cfg.EncryptionKey, string(config))
+	if err != nil {
+		log.Printf("handleUpdateNotificationSettings encrypt: %v", err)
+		respondError(w, http.StatusInternalServerError, "encryption failed")
+		return
+	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -69,7 +104,7 @@ func (s *Server) handleUpdateNotificationSettings(w http.ResponseWriter, r *http
 		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	if _, err := tx.Exec(`INSERT INTO notification_settings (type, config) VALUES ($1, $2)`, body.Type, body.Config); err != nil {
+	if _, err := tx.Exec(`INSERT INTO notification_settings (type, config) VALUES ($1, $2)`, body.Type, encConfig); err != nil {
 		log.Printf("handleUpdateNotificationSettings insert: %v", err)
 		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -85,6 +120,23 @@ func (s *Server) handleUpdateNotificationSettings(w http.ResponseWriter, r *http
 // preserveStoredPassword swaps the redaction sentinel (or an omitted password) for
 // the value already in the database.
 func (s *Server) preserveStoredPassword(incoming json.RawMessage) (json.RawMessage, error) {
+	var storedRaw string
+	if err := s.db.QueryRow(
+		`SELECT config FROM notification_settings LIMIT 1`).Scan(&storedRaw); err != nil {
+		return mergeStoredPassword(incoming, nil) // nothing stored yet
+	}
+	stored, err := notify.DecryptSettingsConfig(s.cfg.EncryptionKey, storedRaw)
+	if err != nil {
+		log.Printf("preserveStoredPassword: %v", err)
+		return mergeStoredPassword(incoming, nil)
+	}
+	return mergeStoredPassword(incoming, stored)
+}
+
+// mergeStoredPassword carries the previously stored password into the incoming config
+// when the UI sent the sentinel or no password at all. When there is nothing to carry
+// over, the sentinel is dropped so it never becomes the actual SMTP password.
+func mergeStoredPassword(incoming, stored json.RawMessage) (json.RawMessage, error) {
 	var cfg map[string]any
 	if err := json.Unmarshal(incoming, &cfg); err != nil {
 		return nil, err
@@ -94,17 +146,16 @@ func (s *Server) preserveStoredPassword(incoming json.RawMessage) (json.RawMessa
 		return incoming, nil // a real new password was supplied
 	}
 
-	var storedRaw []byte
-	if err := s.db.QueryRow(
-		`SELECT config FROM notification_settings LIMIT 1`).Scan(&storedRaw); err != nil {
-		return incoming, nil // nothing stored yet
+	var prev map[string]any
+	if err := json.Unmarshal(stored, &prev); err == nil {
+		if storedPw, ok := prev["password"].(string); ok && storedPw != "" {
+			cfg["password"] = storedPw
+			return json.Marshal(cfg)
+		}
 	}
-	var stored map[string]any
-	if err := json.Unmarshal(storedRaw, &stored); err != nil {
-		return incoming, nil
+	if pw == redactedPasswordSentinel {
+		delete(cfg, "password")
+		return json.Marshal(cfg)
 	}
-	if storedPw, ok := stored["password"].(string); ok && storedPw != "" {
-		cfg["password"] = storedPw
-	}
-	return json.Marshal(cfg)
+	return incoming, nil
 }

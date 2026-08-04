@@ -3,6 +3,7 @@ package models
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +26,9 @@ const (
 	RunStatusRunning = "running"
 	RunStatusSuccess = "success"
 	RunStatusFailed  = "failed"
+	// RunStatusCancelled was written as a bare literal by the API and rendered by
+	// the UI without ever having a constant here.
+	RunStatusCancelled = "cancelled"
 
 	CompressionGzip = "gzip"
 	CompressionZstd = "zstd"
@@ -139,4 +143,25 @@ type EmailNotificationConfig struct {
 	TLS      bool     `json:"tls"`
 	Username string   `json:"username,omitempty"`
 	Password string   `json:"password,omitempty"`
+}
+
+// APIKeyPrefix marks keys that carry a public identifier. Keys issued before this
+// scheme have no prefix and authenticate through the legacy full-table scan.
+const APIKeyPrefix = "natb_"
+
+// ParseAPIKey splits an agent key of the form "natb_<keyID>_<secret>".
+//
+// ok is false for legacy keys, which the caller must fall back to scanning for.
+// Both halves must be non-empty: a malformed key is treated as legacy rather than
+// accepted with an empty identifier.
+func ParseAPIKey(key string) (keyID, secret string, ok bool) {
+	rest, found := strings.CutPrefix(key, APIKeyPrefix)
+	if !found {
+		return "", "", false
+	}
+	keyID, secret, found = strings.Cut(rest, "_")
+	if !found || keyID == "" || secret == "" {
+		return "", "", false
+	}
+	return keyID, secret, true
 }

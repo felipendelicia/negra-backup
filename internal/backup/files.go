@@ -17,7 +17,13 @@ type FilesConfig struct {
 	Compression string
 	Encrypt     bool
 	Passphrase  string
-	OnProgress  func(percent int, currentFile string)
+
+	// OnProgress, if set, is called while the archive is written with a monotonically
+	// increasing percent (never above 100) and the file being archived. It is
+	// throttled — see progressReporter for the policy — and the last call is always
+	// (100, "done"). When encryption is on it runs on the compression goroutine, so
+	// implementations must be safe to call from a goroutine other than the caller's.
+	OnProgress func(percent int, currentFile string)
 }
 
 // BackupResult contains metadata about a completed backup.
@@ -56,6 +62,16 @@ func BackupFiles(cfg FilesConfig, w io.Writer) (BackupResult, error) {
 		}
 	}
 
+	// Real progress: the counting walk above gives the denominator, and the archiving
+	// walk reports the numerator (files completed plus the fraction of the file in
+	// flight). reporter is nil when cfg.OnProgress is nil, which keeps TarCompress on
+	// its no-progress code path.
+	reporter := newProgressReporter(cfg.OnProgress, fileCount)
+	var onProgress TarProgressFunc
+	if reporter != nil {
+		onProgress = reporter.report
+	}
+
 	var totalBytes int64
 	var compErr error
 
@@ -64,7 +80,7 @@ func BackupFiles(cfg FilesConfig, w io.Writer) (BackupResult, error) {
 		pr, pw := io.Pipe()
 		errCh := make(chan error, 1)
 		go func() {
-			n, err := TarCompress(cfg.Paths, pw, cfg.Compression)
+			n, err := TarCompressProgress(cfg.Paths, pw, cfg.Compression, onProgress)
 			totalBytes = n
 			if err != nil {
 				pw.CloseWithError(err)
@@ -75,21 +91,25 @@ func BackupFiles(cfg FilesConfig, w io.Writer) (BackupResult, error) {
 		}()
 
 		if err := EncryptStream(pr, w, cfg.Passphrase); err != nil {
+			// Unblock the writer side, otherwise the goroutine stays parked forever on
+			// pw.Write holding a file open — and, now that it reports progress, keeps
+			// calling cfg.OnProgress long after BackupFiles returned.
+			pr.CloseWithError(err)
+			<-errCh
 			return BackupResult{}, fmt.Errorf("encrypt: %w", err)
 		}
 		if err := <-errCh; err != nil {
 			return BackupResult{}, fmt.Errorf("compress: %w", err)
 		}
 	} else {
-		totalBytes, compErr = TarCompress(cfg.Paths, w, cfg.Compression)
+		totalBytes, compErr = TarCompressProgress(cfg.Paths, w, cfg.Compression, onProgress)
 		if compErr != nil {
 			return BackupResult{}, fmt.Errorf("compress: %w", compErr)
 		}
 	}
 
-	if cfg.OnProgress != nil {
-		cfg.OnProgress(100, "done")
-	}
+	// Always land on exactly 100, whatever the throttle did with the updates before.
+	reporter.finish()
 
 	return BackupResult{
 		SizeBytes: totalBytes,

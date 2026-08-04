@@ -98,10 +98,26 @@ func (s *Server) handleRunLogs(w http.ResponseWriter, r *http.Request) {
 	if run.ErrorMessage != nil {
 		msg = *run.ErrorMessage
 	}
+
+	// Stored log lines, in the order they were produced. This endpoint used to
+	// return status and error only, which is why the UI synthesised a handful of
+	// cosmetic lines for finished runs.
+	type logLine struct {
+		LoggedAt time.Time `db:"logged_at" json:"logged_at"`
+		Line     string    `db:"line"      json:"line"`
+	}
+	lines := []logLine{}
+	if err := s.db.Select(&lines,
+		`SELECT logged_at, line FROM run_logs WHERE run_id=$1 ORDER BY id`, id); err != nil {
+		// The run itself is still worth returning if its log cannot be read.
+		log.Printf("handleRunLogs: load lines for %s: %v", id, err)
+	}
+
 	respond(w, http.StatusOK, map[string]any{
 		"run_id":  id,
 		"status":  run.Status,
 		"message": msg,
+		"lines":   lines,
 	})
 }
 
