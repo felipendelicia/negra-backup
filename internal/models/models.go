@@ -110,6 +110,20 @@ type AdminUser struct {
 // Source configs (stored as JSONB)
 type FilesSource struct {
 	Paths []string `json:"paths"`
+	// Exclude lists patterns for entries the backup must leave out. A matching
+	// directory is pruned, so nothing inside it is even read — which is the point on
+	// trees like node_modules or .cache. The syntax is a subset of .gitignore
+	// (no negations); see internal/backup/exclude.go for the full definition:
+	//
+	//	*.log                     any entry with that name, at any depth
+	//	node_modules              idem, and the whole subtree is skipped
+	//	.cache/                   trailing "/": directories only
+	//	www/*/cache               contains "/": matches that path suffix
+	//	/var/www/*/node_modules   leading "/": matched against the absolute path
+	//	**/dist                   "**" matches any number of segments
+	//
+	// omitempty keeps the JSON of existing jobs byte-identical.
+	Exclude []string `json:"exclude,omitempty"`
 }
 
 type DBSource struct {

@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -69,6 +70,39 @@ type RestoreOptions struct {
 	OnEntry func(RestoreEntry)
 	// Logf receives non-fatal warnings. Defaults to discarding them.
 	Logf func(format string, args ...any)
+	// Include, when non-empty, restores only the members whose archive path matches
+	// one of these patterns; everything else is skipped. Empty restores everything.
+	//
+	// This exists because the common reason to open a backup is "I deleted one file
+	// and I want it back", and unpacking hundreds of gigabytes to recover a few
+	// kilobytes is not an answer. Matching is done on the archive path, so the
+	// pattern an operator sees in the listing is the pattern they can ask for.
+	Include []string
+}
+
+// matchesInclude reports whether an archive member should be restored.
+//
+// A pattern matches when it equals the entry path, when filepath.Match accepts it,
+// or when it names a directory prefix of the entry — asking for "etc/nginx" restores
+// everything under it, which is what a person means by picking a folder.
+func matchesInclude(patterns []string, name string) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	clean := path.Clean(name)
+	for _, p := range patterns {
+		p = path.Clean(p)
+		if p == clean {
+			return true
+		}
+		if strings.HasPrefix(clean, p+"/") {
+			return true
+		}
+		if ok, err := path.Match(p, clean); err == nil && ok {
+			return true
+		}
+	}
+	return false
 }
 
 // IsEncrypted reports whether an archive that starts with these bytes was produced
@@ -104,7 +138,13 @@ func RestoreWithOptions(r io.Reader, destDir, passphrase string, opts RestoreOpt
 	var res RestoreResult
 
 	if destDir == "" {
-		return res, errors.New("restore: destination directory required")
+		// A dry run writes nothing, so it has no destination to require. The path
+		// still has to be non-empty for the containment checks to have a root to
+		// compare against, so it gets one that is never touched.
+		if !opts.DryRun {
+			return res, errors.New("restore: destination directory required")
+		}
+		destDir = "."
 	}
 
 	br := bufio.NewReader(r)
@@ -246,6 +286,12 @@ func extractTar(tr *tar.Reader, destDir string, opts RestoreOptions, res *Restor
 		target := filepath.Join(root, filepath.FromSlash(hdr.Name))
 		if !withinRoot(root, target) {
 			return fmt.Errorf("restore: refusing entry %q: %w", hdr.Name, ErrUnsafePath)
+		}
+
+		// The include filter is applied after the safety checks on purpose: a
+		// malicious entry must be rejected whether or not the operator asked for it.
+		if !matchesInclude(opts.Include, hdr.Name) {
+			continue
 		}
 
 		info := hdr.FileInfo()
@@ -440,4 +486,24 @@ func warnf(opts RestoreOptions, format string, args ...any) {
 	if opts.Logf != nil {
 		opts.Logf(format, args...)
 	}
+}
+
+// ListArchive returns the contents of an archive without writing anything.
+//
+// It is the read-only half of a restore: the UI needs to show what is inside a
+// backup before an operator can pick what to recover from it. The same safety
+// checks apply, so an archive that would be refused on extraction is refused here
+// too rather than being listed as if it were restorable.
+func ListArchive(r io.Reader, passphrase string) ([]RestoreEntry, error) {
+	var entries []RestoreEntry
+	_, err := RestoreWithOptions(r, "", passphrase, RestoreOptions{
+		DryRun: true,
+		OnEntry: func(e RestoreEntry) {
+			entries = append(entries, e)
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
 }

@@ -121,6 +121,21 @@ func (h *AgentHandler) handleAgentMessage(agentID string, msg AgentMessage) {
 	case MsgTypeBrowseResult:
 		h.hub.DeliverBrowseResult(msg.RequestID, msg.Entries, msg.BrowseError)
 
+	case MsgTypeArchiveListing:
+		h.hub.DeliverArchiveListing(msg.RequestID, msg.ArchiveEntries, msg.Error)
+
+	case MsgTypeRestoreProgress:
+		h.hub.BroadcastRunLog(msg.RestoreID, fmt.Sprintf("%d%% %s", msg.Percent, msg.CurrentFile))
+
+	case MsgTypeRestoreDone:
+		h.hub.BroadcastRunLog(msg.RestoreID,
+			fmt.Sprintf("restore completed: %d files, %d bytes", msg.RestoredFiles, msg.RestoredBytes))
+		log.Printf("restore %s completed on agent %s: %d files", msg.RestoreID, agentID, msg.RestoredFiles)
+
+	case MsgTypeRestoreFailed:
+		h.hub.BroadcastRunLog(msg.RestoreID, "restore failed: "+msg.Error)
+		log.Printf("restore %s failed on agent %s: %s", msg.RestoreID, agentID, msg.Error)
+
 	case MsgTypeAgentLog:
 		if h.consoleWriter != nil && msg.Log != "" {
 			// Resolve agent name for the prefix
@@ -162,7 +177,17 @@ func (h *AgentHandler) handleAgentMessage(agentID string, msg AgentMessage) {
 		if msg.Checksum != "" {
 			line += " (sha256:" + msg.Checksum + ")"
 		}
+		if msg.SkippedCount > 0 {
+			line += fmt.Sprintf(" — %d entries skipped, %d of them suspicious",
+				msg.SkippedCount, msg.SkippedSuspicious)
+		}
 		h.recordRunLog(msg.RunID, line)
+
+		// The sample goes in as its own lines so an operator reading the run log
+		// sees exactly what was left out, not just a count.
+		for _, s := range msg.SkippedSample {
+			h.recordRunLog(msg.RunID, s)
+		}
 
 	case MsgTypeJobFailed:
 		if h.db != nil {

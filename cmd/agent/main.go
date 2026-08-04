@@ -207,6 +207,12 @@ func (a *Agent) connect(parent context.Context) error {
 		case ws.MsgTypeBrowsePath:
 			go a.handleBrowse(msg.RequestID, msg.Path)
 
+		case ws.MsgTypeListArchive:
+			go a.handleListArchive(msg)
+
+		case ws.MsgTypeRestore:
+			go a.handleRestore(msg)
+
 		case ws.MsgTypeUpdateAgent:
 			log.Println("update requested by server")
 			go func() {
@@ -254,6 +260,7 @@ func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJ
 
 		cfg := backup.FilesConfig{
 			Paths:       src.Paths,
+			Exclude:     src.Exclude,
 			Compression: job.Compression,
 			Encrypt:     job.Encrypt,
 			Passphrase:  passphrase,
@@ -394,6 +401,11 @@ func (a *Agent) executeJob(ctx context.Context, runID string, job models.BackupJ
 		FileCount:   result.FileCount,
 		StoragePath: filename,
 		Checksum:    hex.EncodeToString(hasher.Sum(nil)),
+		// A backup that silently left files out must say so: the operator has to be
+		// able to tell "backed up everything" from "backed up what it could".
+		SkippedCount:      result.SkippedCount,
+		SkippedSuspicious: result.SkippedSuspicious,
+		SkippedSample:     skippedSample(result.Skipped),
 	}); err != nil {
 		log.Printf("send job_done: %v", err)
 	}
@@ -522,4 +534,21 @@ Alternatively, run it as a scheduled task at startup, or in the foreground with:
   %s %s
 `, exePath, windowsConfigPath, exePath, exePath, windowsConfigPath)
 	return nil
+}
+
+// skippedSample flattens the bounded skip sample into log lines. The list is already
+// capped by BackupFiles, so this cannot grow with the size of the backup.
+func skippedSample(skipped []backup.SkippedFile) []string {
+	if len(skipped) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(skipped))
+	for _, s := range skipped {
+		marker := "skipped"
+		if s.Suspicious {
+			marker = "SKIPPED (suspicious)"
+		}
+		out = append(out, fmt.Sprintf("%s: %s — %s", marker, s.Path, s.Reason))
+	}
+	return out
 }

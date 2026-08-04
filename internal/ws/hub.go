@@ -39,6 +39,12 @@ type BrowseResponse struct {
 	Err     string
 }
 
+// ListingResponse carries the result of a list_archive request.
+type ListingResponse struct {
+	Entries []ArchiveEntry
+	Err     string
+}
+
 type Hub struct {
 	mu     sync.RWMutex
 	agents map[string]*AgentConn
@@ -48,6 +54,9 @@ type Hub struct {
 
 	browseMu   sync.Mutex
 	browseReqs map[string]chan BrowseResponse
+
+	listMu   sync.Mutex
+	listReqs map[string]chan ListingResponse
 
 	register   chan *AgentConn
 	unregister chan *AgentConn
@@ -59,6 +68,7 @@ func NewHub(db *sqlx.DB) *Hub {
 		agents:     make(map[string]*AgentConn),
 		logSubs:    make(map[string][]chan string),
 		browseReqs: make(map[string]chan BrowseResponse),
+		listReqs:   make(map[string]chan ListingResponse),
 		register:   make(chan *AgentConn, 16),
 		unregister: make(chan *AgentConn, 16),
 		db:         db,
@@ -231,6 +241,98 @@ func (h *Hub) BrowsePath(agentID, requestID, path string) ([]BrowseEntry, error)
 		return res.Entries, nil
 	case <-time.After(8 * time.Second):
 		return nil, fmt.Errorf("timeout waiting for agent response")
+	}
+}
+
+// ListArchive asks the agent to list a stored archive without unpacking it, so the
+// UI can show what is inside a backup before anyone commits to restoring from it.
+//
+// The timeout is generous compared to BrowsePath: listing means downloading and
+// decrypting the whole archive from the destination, which for a large backup over
+// a slow link is minutes, not milliseconds.
+func (h *Hub) ListArchive(agentID, requestID string, msg ServerMessage) ([]ArchiveEntry, error) {
+	h.mu.RLock()
+	ac, ok := h.agents[agentID]
+	h.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("agent not connected")
+	}
+
+	ch := make(chan ListingResponse, 1)
+	h.listMu.Lock()
+	h.listReqs[requestID] = ch
+	h.listMu.Unlock()
+
+	defer func() {
+		h.listMu.Lock()
+		delete(h.listReqs, requestID)
+		h.listMu.Unlock()
+	}()
+
+	msg.Type = MsgTypeListArchive
+	msg.RequestID = requestID
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return nil, fmt.Errorf("marshal list request: %w", err)
+	}
+
+	select {
+	case ac.send <- data:
+	case <-ac.done:
+		return nil, fmt.Errorf("agent disconnected")
+	default:
+		return nil, fmt.Errorf("agent send buffer full")
+	}
+
+	select {
+	case res := <-ch:
+		if res.Err != "" {
+			return nil, fmt.Errorf("%s", res.Err)
+		}
+		return res.Entries, nil
+	case <-time.After(5 * time.Minute):
+		return nil, fmt.Errorf("timeout waiting for the agent to list the archive")
+	}
+}
+
+// DeliverArchiveListing routes an archive_listing message to the waiting caller.
+func (h *Hub) DeliverArchiveListing(requestID string, entries []ArchiveEntry, errStr string) {
+	h.listMu.Lock()
+	ch, ok := h.listReqs[requestID]
+	h.listMu.Unlock()
+	if ok {
+		// Non-blocking: the buffered channel holds the one response this request
+		// expects, and a late duplicate must not park this goroutine forever.
+		select {
+		case ch <- ListingResponse{Entries: entries, Err: errStr}:
+		default:
+		}
+	}
+}
+
+// StartRestore asks the agent to restore an archive. It returns as soon as the
+// request is handed off; progress and completion arrive as separate messages.
+func (h *Hub) StartRestore(agentID string, msg ServerMessage) error {
+	h.mu.RLock()
+	ac, ok := h.agents[agentID]
+	h.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("agent %s is not connected", agentID)
+	}
+
+	msg.Type = MsgTypeRestore
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("marshal restore request: %w", err)
+	}
+
+	select {
+	case ac.send <- data:
+		return nil
+	case <-ac.done:
+		return fmt.Errorf("agent %s disconnected before the restore was dispatched", agentID)
+	default:
+		return fmt.Errorf("agent %s send buffer full", agentID)
 	}
 }
 

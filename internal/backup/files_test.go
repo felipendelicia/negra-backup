@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -284,6 +286,318 @@ func TestBackupFiles_ProgressReportsIntermediateUpdates(t *testing.T) {
 	// Throttled: at ~150ms per write over a few seconds, an unthrottled callback would
 	// fire hundreds of times.
 	assert.Less(t, len(updates), 60, "updates are not throttled: %d", len(updates))
+}
+
+// restoredTree restores an archive into a fresh directory and returns the set of
+// entries it contains, keyed by their path relative to the restored root. Going
+// through Restore rather than reading the tar directly also proves, in every test that
+// uses it, that the archive is still a valid and restorable backup.
+func restoredTree(t *testing.T, archive []byte, rootName string) map[string]string {
+	t.Helper()
+
+	dest := t.TempDir()
+	_, err := backup.Restore(bytes.NewReader(archive), dest, "")
+	require.NoError(t, err)
+
+	base := filepath.Join(dest, rootName)
+	got := map[string]string{}
+	require.NoError(t, filepath.Walk(base, func(p string, fi os.FileInfo, err error) error {
+		require.NoError(t, err)
+		if fi.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(base, p)
+		require.NoError(t, err)
+		content, err := os.ReadFile(p)
+		require.NoError(t, err)
+		got[filepath.ToSlash(rel)] = string(content)
+		return nil
+	}))
+	return got
+}
+
+// excludeTree lays out the shape the feature exists for: a couple of real files next
+// to a fat dependency directory and some noise.
+func excludeTree(t *testing.T) string {
+	t.Helper()
+
+	root := filepath.Join(t.TempDir(), "www")
+	for _, dir := range []string{
+		filepath.Join(root, "site1", "node_modules", "left-pad"),
+		filepath.Join(root, "site1", "src"),
+		filepath.Join(root, "site2", "logs"),
+	} {
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+	}
+
+	files := map[string]string{
+		"site1/src/app.php":                        "<?php",
+		"site1/node_modules/left-pad/index.js":     "module.exports",
+		"site1/node_modules/left-pad/package.json": "{}",
+		"site2/logs/access.log":                    "GET /",
+		"site2/index.html":                         "<html>",
+	}
+	for name, content := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(content), 0o644))
+	}
+	return root
+}
+
+func TestBackupFiles_ExcludeByName(t *testing.T) {
+	root := excludeTree(t)
+
+	var buf bytes.Buffer
+	res, err := backup.BackupFiles(backup.FilesConfig{
+		Paths:       []string{root},
+		Exclude:     []string{"node_modules", "*.log"},
+		Compression: backup.CompressionZstd,
+	}, &buf)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, res.FileCount)
+	assert.Zero(t, res.SkippedCount, "an excluded file is not a skipped file")
+
+	got := restoredTree(t, buf.Bytes(), "www")
+	assert.Equal(t, map[string]string{
+		"site1/src/app.php": "<?php",
+		"site2/index.html":  "<html>",
+	}, got)
+}
+
+func TestBackupFiles_ExcludeByPath(t *testing.T) {
+	root := excludeTree(t)
+
+	var buf bytes.Buffer
+	res, err := backup.BackupFiles(backup.FilesConfig{
+		Paths: []string{root},
+		Exclude: []string{
+			filepath.ToSlash(filepath.Join(root, "*", "node_modules")), // absolute, wildcard segment
+			"site2/logs", // relative path suffix
+		},
+		Compression: backup.CompressionZstd,
+	}, &buf)
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.FileCount)
+
+	got := restoredTree(t, buf.Bytes(), "www")
+	assert.Equal(t, map[string]string{
+		"site1/src/app.php": "<?php",
+		"site2/index.html":  "<html>",
+	}, got)
+}
+
+// The progress denominator must apply the same exclusions, otherwise the bar is
+// computed against files that will never be archived.
+func TestBackupFiles_ExcludedFilesDoNotSkewProgress(t *testing.T) {
+	root := excludeTree(t)
+
+	var c progressCollector
+	var buf bytes.Buffer
+	_, err := backup.BackupFiles(backup.FilesConfig{
+		Paths:       []string{root},
+		Exclude:     []string{"node_modules", "*.log"},
+		Compression: backup.CompressionZstd,
+		OnProgress:  c.fn(),
+	}, &buf)
+	require.NoError(t, err)
+
+	updates := c.snapshot()
+	require.NotEmpty(t, updates)
+	assert.Equal(t, 100, updates[len(updates)-1].percent)
+	for _, u := range updates {
+		assert.NotContains(t, u.file, "node_modules",
+			"an excluded file was reported as being archived")
+	}
+}
+
+// unreadableDir writes n files and makes the first `bad` of them impossible to open.
+func unreadableDir(t *testing.T, n, bad int) (root string, unreadable []string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod does not remove read access on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permissions do not stop the read")
+	}
+
+	root = filepath.Join(t.TempDir(), "data")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	for i := 0; i < n; i++ {
+		p := filepath.Join(root, fmt.Sprintf("f%02d.txt", i))
+		require.NoError(t, os.WriteFile(p, []byte("content"), 0o644))
+		if i < bad {
+			require.NoError(t, os.Chmod(p, 0o000))
+			unreadable = append(unreadable, p)
+		}
+	}
+	return root, unreadable
+}
+
+// The whole point of 5b: one locked or protected file must not cost the other 99%.
+func TestBackupFiles_UnreadableFileIsSkippedNotFatal(t *testing.T) {
+	root, unreadable := unreadableDir(t, 20, 1)
+
+	var buf bytes.Buffer
+	res, err := backup.BackupFiles(backup.FilesConfig{
+		Paths:       []string{root},
+		Compression: backup.CompressionZstd,
+	}, &buf)
+	require.NoError(t, err, "one unreadable file must not fail the backup")
+
+	assert.Equal(t, 19, res.FileCount)
+	assert.Equal(t, 1, res.SkippedCount)
+	assert.Equal(t, 1, res.SkippedSuspicious, "permission denied is suspicious, not routine")
+	require.Len(t, res.Skipped, 1)
+	assert.Equal(t, unreadable[0], res.Skipped[0].Path)
+	assert.True(t, res.Skipped[0].Suspicious)
+	assert.Contains(t, res.Skipped[0].Reason, "permission denied")
+
+	// And the 19 that could be read are really there, restorable.
+	got := restoredTree(t, buf.Bytes(), "data")
+	assert.Len(t, got, 19)
+	assert.NotContains(t, got, filepath.Base(unreadable[0]))
+	for _, content := range got {
+		assert.Equal(t, "content", content)
+	}
+}
+
+// Same, through the encryption pipeline, where the skip is recorded on the compression
+// goroutine. Run with -race.
+func TestBackupFiles_UnreadableFileSkippedWhenEncrypted(t *testing.T) {
+	root, _ := unreadableDir(t, 20, 1)
+
+	const pass = "skip-passphrase"
+	var buf bytes.Buffer
+	res, err := backup.BackupFiles(backup.FilesConfig{
+		Paths:       []string{root},
+		Compression: backup.CompressionZstd,
+		Encrypt:     true,
+		Passphrase:  pass,
+	}, &buf)
+	require.NoError(t, err)
+	assert.Equal(t, 19, res.FileCount)
+	assert.Equal(t, 1, res.SkippedSuspicious)
+
+	dest := t.TempDir()
+	rres, err := backup.Restore(bytes.NewReader(buf.Bytes()), dest, pass)
+	require.NoError(t, err)
+	assert.Equal(t, 19, rres.FileCount)
+}
+
+// Tolerance has a limit: a tree where most files cannot be read is a broken disk or a
+// broken permission set, and reporting that as a successful backup is the failure mode
+// this whole exercise is about.
+func TestBackupFiles_TooManyUnreadableFilesFails(t *testing.T) {
+	root, _ := unreadableDir(t, 20, 11)
+
+	var buf bytes.Buffer
+	_, err := backup.BackupFiles(backup.FilesConfig{
+		Paths:       []string{root},
+		Compression: backup.CompressionZstd,
+	}, &buf)
+	require.ErrorIs(t, err, backup.ErrTooManySkipped)
+}
+
+// Progress must still land on 100 when part of the tree could not be read: the
+// denominator counted those files, the numerator never will.
+func TestBackupFiles_ProgressStillReaches100WithSkips(t *testing.T) {
+	root, _ := unreadableDir(t, 20, 5)
+
+	var c progressCollector
+	var buf bytes.Buffer
+	_, err := backup.BackupFiles(backup.FilesConfig{
+		Paths:       []string{root},
+		Compression: backup.CompressionZstd,
+		OnProgress:  c.fn(),
+	}, &buf)
+	require.NoError(t, err)
+
+	updates := c.snapshot()
+	require.NotEmpty(t, updates)
+	last := -1
+	for i, u := range updates {
+		assert.GreaterOrEqual(t, u.percent, last, "update %d: percent went backwards", i)
+		assert.LessOrEqual(t, u.percent, 100)
+		last = u.percent
+	}
+	assert.Equal(t, 100, updates[len(updates)-1].percent)
+}
+
+// A file that disappears between the listing and the read, and a socket, are both
+// normal. Neither may count against the failure budget.
+func TestBackupFiles_ExpectedSkipsAreNotSuspicious(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets are not part of the Windows backup story")
+	}
+
+	root := filepath.Join(t.TempDir(), "data")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "real.txt"), []byte("real"), 0o644))
+
+	sock := filepath.Join(root, "daemon.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skipf("cannot create unix socket: %v", err)
+	}
+	defer l.Close()
+
+	var buf bytes.Buffer
+	res, err := backup.BackupFiles(backup.FilesConfig{
+		Paths:       []string{root},
+		Compression: backup.CompressionZstd,
+	}, &buf)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, res.FileCount)
+	assert.Equal(t, 1, res.SkippedCount)
+	assert.Zero(t, res.SkippedSuspicious, "a socket is not a symptom of anything")
+	require.Len(t, res.Skipped, 1)
+	assert.False(t, res.Skipped[0].Suspicious)
+
+	assert.Equal(t, map[string]string{"real.txt": "real"}, restoredTree(t, buf.Bytes(), "data"))
+}
+
+// A missing root is not a skip: it is a mistyped path or an unmounted volume, and an
+// empty archive reported as a success is the worst outcome a backup tool can produce.
+func TestBackupFiles_MissingRootIsFatal(t *testing.T) {
+	var buf bytes.Buffer
+	_, err := backup.BackupFiles(backup.FilesConfig{
+		Paths:       []string{filepath.Join(t.TempDir(), "does-not-exist")},
+		Compression: backup.CompressionZstd,
+	}, &buf)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+// Symlinks used to kill a file backup outright: the header declared a symlink (zero
+// bytes) and the copy then pushed the target's contents into it, so tar answered
+// "write too long" and the run failed.
+func TestBackupFiles_SymlinkIsArchivedAsLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+
+	root := filepath.Join(t.TempDir(), "data")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "real.txt"), []byte("real"), 0o644))
+	require.NoError(t, os.Symlink("real.txt", filepath.Join(root, "link.txt")))
+
+	var buf bytes.Buffer
+	res, err := backup.BackupFiles(backup.FilesConfig{
+		Paths:       []string{root},
+		Compression: backup.CompressionZstd,
+	}, &buf)
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.FileCount)
+	assert.Zero(t, res.SkippedCount)
+
+	dest := t.TempDir()
+	_, err = backup.Restore(bytes.NewReader(buf.Bytes()), dest, "")
+	require.NoError(t, err)
+
+	fi, err := os.Lstat(filepath.Join(dest, "data", "link.txt"))
+	require.NoError(t, err)
+	assert.NotZero(t, fi.Mode()&os.ModeSymlink, "the link must come back as a link")
 }
 
 // A nil OnProgress must be free and must not change what gets written.
