@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/felipendelicia/nat-backup/internal/crypto"
 	"github.com/felipendelicia/nat-backup/internal/models"
+	"github.com/felipendelicia/nat-backup/internal/notify"
 	"github.com/felipendelicia/nat-backup/internal/scheduler"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -63,6 +66,61 @@ func validateRetryPolicy(req *createJobRequest) error {
 	return nil
 }
 
+// jobLastRun is the summary of a job's most recent run carried on the jobs list.
+type jobLastRun struct {
+	ID           uuid.UUID  `json:"id"`
+	Status       string     `json:"status"`
+	StartedAt    time.Time  `json:"started_at"`
+	FinishedAt   *time.Time `json:"finished_at"`
+	ErrorMessage *string    `json:"error_message"`
+}
+
+// jobListItem is a job plus the answer to "is it up to date".
+//
+// The extra fields are additive, so a client that predates them (the current web UI)
+// keeps working unchanged. models.BackupJob is embedded rather than duplicated, and
+// the extra fields live here rather than on the model because they are not columns
+// of backup_jobs — they are derived per request.
+type jobListItem struct {
+	models.BackupJob
+	LastRun       *jobLastRun `json:"last_run"`
+	LastSuccessAt *time.Time  `json:"last_success_at"`
+	NextRun       *time.Time  `json:"next_run"`
+	Health        string      `json:"health"`
+	HealthDetail  string      `json:"health_detail"`
+	// The agent dimension of the same question: a perfectly configured job on a
+	// machine that has been offline for two days is not backed up.
+	AgentOnline   bool       `json:"agent_online"`
+	AgentLastSeen *time.Time `json:"agent_last_seen"`
+}
+
+// healthThresholds are the same numbers the dead-man's switch runs on, so the badge
+// in the UI and the email in the inbox can never disagree.
+//
+// Read once per process rather than per request: they come from the environment and
+// cannot change while the server runs.
+var (
+	healthCfgOnce sync.Once
+	healthCfg     notify.DeadManConfig
+)
+
+func jobHealthConfig() notify.DeadManConfig {
+	healthCfgOnce.Do(func() { healthCfg = notify.DeadManConfigFromEnv() })
+	return healthCfg
+}
+
+// handleListJobs returns every job together with its last run, its next run and a
+// derived health verdict.
+//
+// Extending this endpoint rather than adding a second one is deliberate: there is
+// exactly one consumer, it renders one table, and every row of that table wants the
+// health. A separate endpoint would mean a second round trip and a join done in the
+// browser — with the two halves able to disagree while the page is half-loaded.
+//
+// It is three queries for the whole list, never one per job: the jobs, one
+// LATERAL-joined health query (notify.LoadJobHealth), and an in-memory snapshot of
+// the cron entries. If the health query fails the jobs are still returned, with
+// health "unknown": a broken health badge must not take the Jobs page down with it.
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	jobs := []models.BackupJob{}
 	if err := s.db.Select(&jobs, `
@@ -74,7 +132,143 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	respond(w, http.StatusOK, jobs)
+
+	cfg := jobHealthConfig()
+	now := time.Now()
+
+	health := map[uuid.UUID]notify.JobHealth{}
+	rows, err := notify.LoadJobHealth(s.db, now, cfg.JobGrace)
+	if err != nil {
+		log.Printf("handleListJobs health: %v", err)
+	}
+	for _, h := range rows {
+		health[h.JobID] = h
+	}
+
+	// next_run comes from the scheduler's own cron entries, not from re-parsing
+	// schedule_cron. The entry is what the server will actually do: a job whose
+	// expression failed to load has no entry and therefore no next run, while
+	// recomputing the string would invent a timestamp nobody is going to honour.
+	var nextRuns map[string]time.Time
+	if s.sched != nil {
+		nextRuns = s.sched.NextRuns()
+	}
+
+	out := make([]jobListItem, 0, len(jobs))
+	for _, job := range jobs {
+		item := jobListItem{BackupJob: job, Health: string(notify.HealthUnknown)}
+		if h, ok := health[job.ID]; ok {
+			item.Health = string(h.Status)
+			item.HealthDetail = h.Detail
+			item.LastSuccessAt = h.LastSuccessAt
+			item.AgentLastSeen = h.AgentLastSeen
+			item.AgentOnline = h.AgentLastSeen != nil &&
+				now.Sub(*h.AgentLastSeen) <= cfg.AgentOfflineAfter
+			if h.LastRunID != nil && h.LastRunStartedAt != nil && h.LastRunStatus != nil {
+				item.LastRun = &jobLastRun{
+					ID:           *h.LastRunID,
+					Status:       *h.LastRunStatus,
+					StartedAt:    *h.LastRunStartedAt,
+					FinishedAt:   h.LastRunFinishedAt,
+					ErrorMessage: h.LastRunError,
+				}
+			}
+		}
+		if next, ok := nextRuns[job.ID.String()]; ok {
+			n := next
+			item.NextRun = &n
+		}
+		out = append(out, item)
+	}
+	respond(w, http.StatusOK, out)
+}
+
+// handleHealthSummary answers "is everything backed up and up to date?" in one call.
+//
+// It is the aggregate the Jobs list cannot give: per-agent state (which lives on
+// agents, not on jobs) plus the alerts the dead-man's switch currently holds open,
+// which is the only place the switch's own state is visible from outside an inbox.
+func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
+	cfg := jobHealthConfig()
+	now := time.Now()
+
+	jobs, err := notify.LoadJobHealth(s.db, now, cfg.JobGrace)
+	if err != nil {
+		log.Printf("handleHealthSummary jobs: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	agents, err := notify.LoadAgentHealth(s.db, now, cfg.AgentOfflineAfter)
+	if err != nil {
+		log.Printf("handleHealthSummary agents: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	alerts, err := notify.LoadOpenAlerts(s.db)
+	if err != nil {
+		log.Printf("handleHealthSummary alerts: %v", err)
+		respondError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if alerts == nil {
+		alerts = []notify.OpenAlert{}
+	}
+
+	type agentSummary struct {
+		ID             uuid.UUID  `json:"id"`
+		Name           string     `json:"name"`
+		LastSeen       *time.Time `json:"last_seen"`
+		Online         bool       `json:"online"`
+		SilentForSecs  int64      `json:"silent_for_seconds"`
+		EnabledJobs    int        `json:"enabled_jobs"`
+		TotalJobs      int        `json:"total_jobs"`
+		HasBackupsHere bool       `json:"has_backups_here"`
+	}
+
+	jobCounts := map[string]int{}
+	for _, j := range jobs {
+		jobCounts[string(j.Status)]++
+	}
+
+	agentList := make([]agentSummary, 0, len(agents))
+	online := 0
+	for _, a := range agents {
+		if a.Online {
+			online++
+		}
+		agentList = append(agentList, agentSummary{
+			ID:             a.AgentID,
+			Name:           a.Name,
+			LastSeen:       a.LastSeen,
+			Online:         a.Online,
+			SilentForSecs:  int64(a.SilentFor.Seconds()),
+			EnabledJobs:    a.EnabledJobs,
+			TotalJobs:      a.TotalJobs,
+			HasBackupsHere: a.EnabledJobs > 0,
+		})
+	}
+
+	respond(w, http.StatusOK, map[string]any{
+		"generated_at": now,
+		"thresholds": map[string]string{
+			"agent_offline_after": cfg.AgentOfflineAfter.String(),
+			"job_grace":           cfg.JobGrace.String(),
+			"check_interval":      cfg.CheckInterval.String(),
+			"repeat_interval":     cfg.RepeatInterval.String(),
+			"deadman_enabled":     strconv.FormatBool(cfg.Enabled),
+		},
+		"jobs": map[string]any{
+			"total":     len(jobs),
+			"by_health": jobCounts,
+		},
+		"agents": map[string]any{
+			"total":   len(agents),
+			"online":  online,
+			"offline": len(agents) - online,
+			"items":   agentList,
+		},
+		"open_alerts": alerts,
+	})
 }
 
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {

@@ -11,6 +11,7 @@ Applied migrations:
 | `001_initial_schema.up.sql` | Creates the `uuid-ossp` extension, all six tables and four indexes |
 | `002_storage_config_text.up.sql` | `storage_destinations.config` **and** `notification_settings.config` JSONB → TEXT |
 | `004_job_retries.up.sql` | Retry policy on `backup_jobs`, attempt counter on `backup_runs`, and the partial unique index that allows one running run per job |
+| `006_alert_state.up.sql` | `alert_state`: the open-alert memory of the dead-man's switch, so an outage produces a handful of emails instead of one per check |
 
 This document mirrors the DDL. Every column below is taken from the migration
 files; the "written values" notes cite the Go code that produces them.
@@ -158,6 +159,15 @@ Values written to `status`:
 `cancelled` is terminal and sticky: `handleAgentMessage` skips the `failed` update
 when the row is already `cancelled`.
 
+Every `failed` row now also raises an email. Agent-reported failures go through
+`internal/ws/handler.go`; failures the **server** decides on its own — the agent is
+not connected, the storage destination cannot be decrypted, the backup passphrase
+cannot be recovered — go through `scheduler.SetNotifier`, which did not exist before
+and left those rows silent. The one exception is the overlap skip (`attempt = 0`):
+a job whose runs outlast their interval would send one email per tick, so the skip
+is recorded and left to the dead-man's switch, which reports the consequence (no
+fresh successful backup) once.
+
 Values written to `attempt`:
 
 | Value | Meaning |
@@ -243,6 +253,111 @@ run is over.
 
 ---
 
+## `alert_state`
+
+Added by migration 006. The memory of the dead-man's switch
+(`internal/notify/deadman.go`): one row per condition that is currently open.
+
+| Column | Type | Null | Default | Notes |
+|--------|------|------|---------|-------|
+| `subject_type` | TEXT | NOT NULL | — | `agent` or `job`. Part of the PRIMARY KEY |
+| `subject_id` | UUID | NOT NULL | — | `agents(id)` or `backup_jobs(id)` depending on `subject_type`. Part of the PRIMARY KEY. **No foreign key**: one column cannot reference two tables |
+| `kind` | TEXT | NOT NULL | — | `agent_offline` or `job_late`. Part of the PRIMARY KEY |
+| `first_seen_at` | TIMESTAMPTZ | NOT NULL | `NOW()` | When the condition was first observed; written explicitly by the checker. Survives re-notification, so the email can say how long the thing has been broken |
+| `last_notified_at` | TIMESTAMPTZ | NULL | — | NULL means "open, but nobody has been told yet" — what happens when SMTP itself is down |
+| `notify_count` | INTEGER | NOT NULL | `0` | Incremented only on a **successful** send |
+| `detail` | TEXT | NOT NULL | `''` | The human-readable reason, refreshed on every pass |
+
+PRIMARY KEY `(subject_type, subject_id, kind)`; index `idx_alert_state_kind`.
+
+### Why a table and not a map in memory
+
+The switch fires every 5 minutes by default. Without persistent state, an agent that
+has been down for five days sends 1440 emails, which trains everybody to filter the
+alerts out — the exact outcome the feature exists to prevent. In-memory state would
+solve that only until the next restart, and it fails twice over:
+
+* a server that restarts (deploy, crash loop, OOM) re-sends every open alert on boot,
+  turning a crash loop into a mail loop;
+* recovery notices become impossible across a restart. "The agent came back" can only
+  be sent by something that still remembers it was gone.
+
+### Lifecycle
+
+1. The condition is observed → the row is inserted (`ON CONFLICT DO UPDATE SET
+   detail`), **before** any send.
+2. The alert is sent when `notify_count = 0`, or when `NOW() - last_notified_at >=`
+   the repeat interval (default 24 h). Only after a successful send is
+   `last_notified_at` written and `notify_count` incremented — a failing mail server
+   leaves the alert open and it is retried next pass instead of being recorded as
+   delivered and never mentioned again.
+3. The condition clears → a recovery email is sent and the row is deleted **only if
+   the send succeeded**, so a lost recovery notice is retried rather than dropped. A
+   row with `notify_count = 0` is deleted silently: announcing the recovery of
+   something nobody was told about is noise.
+4. Rows whose subject no longer exists are deleted at the start of every pass, so
+   deleting an agent cannot later produce a "recovered" email for a ghost.
+
+### What opens an alert
+
+| Kind | Condition |
+|------|-----------|
+| `agent_offline` | `COALESCE(agents.last_seen, agents.created_at)` older than `DEADMAN_AGENT_OFFLINE_AFTER` (default 15 min ≈ 30 missed heartbeats) **and** the agent has at least one enabled job. `agents.status` is deliberately not read: it is a cache of what the hub believes, `last_seen` is the fact |
+| `job_late` | The job's derived health is `late` or `never_run` — see below |
+
+`failing` never opens an alert: a run that failed already sends its own email from
+`internal/ws/handler.go` (agent-reported) or `internal/scheduler` (server-detected).
+This switch reports **absence**, and duplicating the failure mail is the fastest way
+to get all of them ignored.
+
+### Derived job health
+
+Computed by `notify.JobHealth.Classify` and served both to `GET /api/jobs` (as
+`health`) and to the alerting code, so the badge in the UI and the email in the inbox
+cannot disagree. Evaluated in this order:
+
+| Verdict | Criterion |
+|---------|-----------|
+| `disabled` | `enabled = false`. Somebody turned it off deliberately; not an alert |
+| `unknown` | `schedule_cron` does not parse, or never fires again |
+| `running` | The last run is still `running`; nothing to judge yet |
+| `never_run` | No run row at all. Only alerts once a scheduled tick has passed by the grace window **since the job was created** |
+| `late` | (a) the previous scheduled tick was more than `DEADMAN_JOB_GRACE` ago and no run started at or after it, **or** (b) the newest successful run is older than one schedule interval + grace |
+| `failing` | The last run is `failed` or `cancelled`, and neither (a) nor (b) holds |
+| `ok` | Everything else |
+
+`late` deliberately outranks `failing`: a job whose last run failed three days ago
+and has not run since is not merely failing, it is silent, and one email sent three
+days ago is not telling anybody about today.
+
+The previous scheduled tick is found by walking `robfig/cron`'s `Next` forward from
+three intervals back (the library has no `Prev`), clamped to `backup_jobs.created_at`
+so a job created this morning has not "missed" last week. **`@every <duration>` has
+no absolute phase** — cron models it as `t + d` from whenever it is asked — so
+criterion (a) can never fire for such a job; criterion (b), which needs no phase, is
+what covers it.
+
+### Thresholds
+
+Read from the environment by `notify.DeadManConfigFromEnv` (not by
+`internal/config`: nothing else reads them, and a typo in an alerting threshold must
+not stop the backup server from booting — an unparseable value logs a warning and
+falls back).
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `DEADMAN_ENABLED` | `true` | `0`/`false`/`no`/`off` disables the switch |
+| `DEADMAN_CHECK_INTERVAL` | `5m` | How often the check runs. Every threshold it compares against is measured in tens of minutes and cron's own resolution is one minute, so a faster tick would add load without reducing detection latency |
+| `DEADMAN_AGENT_OFFLINE_AFTER` | `15m` | Agents heartbeat every 30 s and the server's read deadline is 60 s, so this is ~30 missed beats: past any blip, restart or upgrade |
+| `DEADMAN_JOB_GRACE` | `30m` | How late a scheduled run may be before it counts as missed. Must exceed the check interval, with room for the hand-off to the agent |
+| `DEADMAN_REPEAT_INTERVAL` | `24h` | How often a still-open alert is repeated |
+
+The first pass is delayed by one interval after boot: at startup the hub is empty and
+every agent has just been reset to `offline`, so checking immediately would alert on
+agents that reconnect seconds later.
+
+---
+
 ## `admin_users`
 
 | Column | Type | Null | Default | Notes |
@@ -307,6 +422,16 @@ identifier is public and indexed, so the row is found directly and exactly one h
 is verified. Keys issued earlier have `api_key_id IS NULL` and still authenticate
 through the scan, which is now restricted to those rows; regenerating an agent's key
 moves it onto the indexed path.
+
+### Indexes added by migration 006
+
+| Index | Why |
+|-------|-----|
+| `alert_state(kind)` | Filtering the open alerts by kind. The table is tiny (one row per *open* problem), so the primary key covers everything else |
+
+No new index was needed for the health query itself: the two LATERAL joins in
+`notify.LoadJobHealth` are `LIMIT 1` backwards walks of
+`idx_backup_runs_job_id_started_at` (migration 003), one index descent per job.
 
 ### Indexes added by migration 004
 

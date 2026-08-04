@@ -79,32 +79,55 @@ func NewDBNotifierWithKey(db *sqlx.DB, encKey string) *DBNotifier {
 	return &DBNotifier{db: db, encKey: encKey}
 }
 
-func (n *DBNotifier) SendFailureAlert(jobName, agentName, runID, errMsg string) error {
+// sender resolves the current email configuration and returns a sender for it.
+//
+// A nil sender with a nil error means "there is nothing configured to send with",
+// which is not a failure: a fresh install has no notification row, and an
+// incomplete one has nowhere to deliver to. Callers must check for nil.
+func (n *DBNotifier) sender() (*EmailSender, error) {
 	if n.db == nil {
-		return nil
+		return nil, nil
 	}
 	var stored string
 	err := n.db.QueryRow(
 		`SELECT config FROM notification_settings WHERE type='email' LIMIT 1`).Scan(&stored)
 	if err == sql.ErrNoRows {
-		return nil // notifications not configured; not an error
+		return nil, nil // notifications not configured; not an error
 	}
 	if err != nil {
-		return fmt.Errorf("load notification settings: %w", err)
+		return nil, fmt.Errorf("load notification settings: %w", err)
 	}
 
 	raw, err := DecryptSettingsConfig(n.encKey, stored)
 	if err != nil {
-		return fmt.Errorf("read notification settings: %w", err)
+		return nil, fmt.Errorf("read notification settings: %w", err)
 	}
 
 	var cfg models.EmailNotificationConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return fmt.Errorf("parse notification settings: %w", err)
+		return nil, fmt.Errorf("parse notification settings: %w", err)
 	}
 	if cfg.SMTPHost == "" || len(cfg.To) == 0 {
-		return nil // configured but incomplete; nothing to send to
+		return nil, nil // configured but incomplete; nothing to send to
 	}
+	return NewEmailSender(cfg), nil
+}
 
-	return NewEmailSender(cfg).SendFailureAlert(jobName, agentName, runID, errMsg)
+func (n *DBNotifier) SendFailureAlert(jobName, agentName, runID, errMsg string) error {
+	sender, err := n.sender()
+	if err != nil || sender == nil {
+		return err
+	}
+	return sender.SendFailureAlert(jobName, agentName, runID, errMsg)
+}
+
+// SendAlert delivers a pre-composed alert, reading the SMTP configuration from the
+// database exactly like SendFailureAlert does. It is what the dead-man's switch
+// notifies through.
+func (n *DBNotifier) SendAlert(subject, body string) error {
+	sender, err := n.sender()
+	if err != nil || sender == nil {
+		return err
+	}
+	return sender.SendAlert(subject, body)
 }

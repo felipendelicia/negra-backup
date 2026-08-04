@@ -56,6 +56,17 @@ type JobDispatcher interface {
 	DispatchJob(agentID, runID string, job models.BackupJob, storageType string, storageConfig json.RawMessage, passphrase string) error
 }
 
+// FailureNotifier is how the scheduler reports a failure it detected itself.
+//
+// It is declared here rather than imported from internal/notify so that package can
+// keep depending on this one (it parses cron expressions) without a cycle. The
+// signature matches ws.FailureNotifier deliberately: notify.DBNotifier satisfies
+// both, so the same notifier instance serves the agent-reported failures and the
+// server-detected ones.
+type FailureNotifier interface {
+	SendFailureAlert(jobName, agentName, runID, errMsg string) error
+}
+
 type Scheduler struct {
 	cron       *cron.Cron
 	db         *sqlx.DB
@@ -63,6 +74,10 @@ type Scheduler struct {
 	mu         sync.Mutex
 	entryIDs   map[string]cron.EntryID
 	encKey     string
+
+	// notifier is read from several goroutines (cron entries, the retry scanner) and
+	// written once at wiring time, so it is guarded by mu like entryIDs.
+	notifier FailureNotifier
 
 	// done stops the retry scanner. stopOnce keeps Stop idempotent — it is called
 	// from tests and from shutdown paths that may both fire.
@@ -82,6 +97,21 @@ func New(db *sqlx.DB, dispatcher JobDispatcher, encKey string) *Scheduler {
 		encKey:     encKey,
 		done:       make(chan struct{}),
 	}
+}
+
+// SetNotifier wires the alert channel for failures the SERVER detects.
+//
+// Until this existed the only email in the system came from internal/ws/handler.go
+// on a `job_failed` message from an agent. Everything the scheduler decides on its
+// own — the agent is offline so the job could not be dispatched, the storage
+// destination cannot be read, the backup passphrase cannot be decrypted — was
+// written to backup_runs as `failed` and nothing else happened. Those are exactly
+// the failures where no agent is in a position to report anything, so they were the
+// ones most likely to go unnoticed.
+func (s *Scheduler) SetNotifier(n FailureNotifier) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notifier = n
 }
 
 func (s *Scheduler) Start() {
@@ -143,6 +173,40 @@ func (s *Scheduler) RemoveJob(jobID string) {
 		s.cron.Remove(id)
 		delete(s.entryIDs, jobID)
 	}
+}
+
+// NextRuns reports when each loaded job will fire next, keyed by job id.
+//
+// This is the scheduler's own answer, not a recomputation from schedule_cron, and
+// the difference is the point. A job whose cron expression failed to load (AddJob
+// returned an error) or that is disabled has no entry here at all, so it correctly
+// reports no next run — whereas parsing the string again would happily produce a
+// timestamp for a job this process is never going to run. On a page whose whole
+// purpose is "is everything backed up and on schedule", a next_run the server has no
+// intention of honouring is worse than no answer.
+//
+// One snapshot for the whole map rather than cron.Entry(id) per job: Entry walks
+// every entry (and, on a running cron, round-trips through the scheduler goroutine),
+// so per-job lookups would be quadratic on the jobs list.
+func (s *Scheduler) NextRuns() map[string]time.Time {
+	// Taken before s.mu: Entries() synchronises with the cron run loop, and holding
+	// our own lock across it would invert the order AddJob uses (s.mu, then cron).
+	byEntry := make(map[cron.EntryID]time.Time)
+	for _, e := range s.cron.Entries() {
+		byEntry[e.ID] = e.Next
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]time.Time, len(s.entryIDs))
+	for jobID, entryID := range s.entryIDs {
+		// A zero Next means the cron has not been started yet, or the schedule is
+		// unsatisfiable. Either way there is no honest answer, so omit the key.
+		if next, ok := byEntry[entryID]; ok && !next.IsZero() {
+			out[jobID] = next
+		}
+	}
+	return out
 }
 
 // BeginRun claims the single "in progress" slot for a job and returns the new run.
@@ -233,7 +297,7 @@ func (s *Scheduler) triggerJob(job models.BackupJob, attempt int) {
 		job.AgentID.String(), runID, job, storageType, storageConfig, passphrase,
 	); err != nil {
 		log.Printf("scheduler dispatch job %s: %v", job.ID, err)
-		s.failRun(runID, err.Error())
+		s.failRun(job, runID, err.Error())
 	}
 }
 
@@ -384,12 +448,50 @@ func (s *Scheduler) resolvePassphrase(job models.BackupJob) (string, error) {
 // an unreachable destination is very often transient — is retried like any other.
 func (s *Scheduler) recordFailedRun(job models.BackupJob, attempt int, msg string) {
 	log.Printf("scheduler job %s: %s", job.ID, msg)
-	if _, err := s.db.Exec(
+	var runID uuid.UUID
+	if err := s.db.QueryRow(
 		`INSERT INTO backup_runs (job_id, status, attempt, finished_at, error_message)
-		 VALUES ($1, 'failed', $2, NOW(), $3)`, job.ID, attempt, msg,
-	); err != nil {
+		 VALUES ($1, 'failed', $2, NOW(), $3) RETURNING id`, job.ID, attempt, msg,
+	).Scan(&runID); err != nil {
 		log.Printf("scheduler record failed run for job %s: %v", job.ID, err)
+		return
 	}
+	s.notifyRunFailure(job, runID.String(), msg)
+}
+
+// notifyRunFailure emails a failure the server detected on its own.
+//
+// The agent name is resolved here, synchronously, on purpose: the goroutine below
+// must not touch the database, because it can easily outlive the caller (and, in
+// tests, the pool).
+//
+// The send itself is fire-and-forget. Its callers are the cron goroutine and the
+// retry scanner; net/smtp has no deadline of its own, so blocking either of them on
+// an unreachable mail server would stop the backups themselves — a strictly worse
+// outcome than a delayed alert. This mirrors what internal/ws/handler.go already
+// does for agent-reported failures.
+func (s *Scheduler) notifyRunFailure(job models.BackupJob, runID, msg string) {
+	s.mu.Lock()
+	n := s.notifier
+	s.mu.Unlock()
+	if n == nil {
+		return
+	}
+
+	agentName := job.AgentID.String()
+	if s.db != nil {
+		var name string
+		if err := s.db.QueryRow(
+			`SELECT name FROM agents WHERE id=$1`, job.AgentID).Scan(&name); err == nil && name != "" {
+			agentName = name
+		}
+	}
+
+	go func() {
+		if err := n.SendFailureAlert(job.Name, agentName, runID, msg); err != nil {
+			log.Printf("scheduler: send failure alert for job %s: %v", job.ID, err)
+		}
+	}()
 }
 
 // recordSkippedRun leaves a trace of an execution that never happened. A log line
@@ -400,6 +502,12 @@ func (s *Scheduler) recordFailedRun(job models.BackupJob, attempt int, msg strin
 // It is stored with attempt = attemptSkipped so the retry scanner ignores it: there
 // is nothing to retry here, the run that caused the overlap is still going and will
 // be retried on its own if it fails.
+//
+// It deliberately does NOT notify. A job whose runs routinely outlast their interval
+// produces one skip per tick, so mailing on each one is the spam the dead-man's
+// switch exists to avoid — and the consequence of chronic skipping (no fresh
+// successful backup) is what that switch reports, once, from
+// internal/notify/deadman.go.
 func (s *Scheduler) recordSkippedRun(job models.BackupJob) {
 	msg := "Skipped: " + ErrRunOverlap.Error()
 	log.Printf("scheduler job %s: %s", job.ID, msg)
@@ -411,18 +519,38 @@ func (s *Scheduler) recordSkippedRun(job models.BackupJob) {
 	}
 }
 
-func (s *Scheduler) failRun(runID, msg string) {
+func (s *Scheduler) failRun(job models.BackupJob, runID, msg string) {
 	if _, err := s.db.Exec(
 		`UPDATE backup_runs SET status='failed', finished_at=NOW(), error_message=$2 WHERE id=$1`,
 		runID, msg,
 	); err != nil {
 		log.Printf("scheduler fail run %s: %v", runID, err)
 	}
+	// The commonest reason a dispatch fails is that the agent is not connected —
+	// precisely the case where no agent will ever send a `job_failed` message, so
+	// this is the only chance anyone has to hear about it.
+	s.notifyRunFailure(job, runID, msg)
+}
+
+// cronParser is the dialect accepted by backup_jobs.schedule_cron: standard 5-field
+// cron (minute, hour, day-of-month, month, day-of-week) plus descriptors. Seconds
+// are not enabled.
+var cronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+
+// ParseCron compiles a schedule expression into something that can answer "when
+// next".
+//
+// Exported so that anything reasoning about when a job *should* have run — the
+// dead-man's switch in internal/notify — uses the exact dialect the scheduler
+// itself uses. A second parser built with a different flag set would silently
+// disagree with the scheduler about what a job's schedule means, which is a
+// spectacular way for a watchdog to be wrong.
+func ParseCron(expr string) (cron.Schedule, error) {
+	return cronParser.Parse(expr)
 }
 
 // ValidateCron returns an error if the cron expression is invalid.
 func ValidateCron(expr string) error {
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-	_, err := parser.Parse(expr)
+	_, err := ParseCron(expr)
 	return err
 }

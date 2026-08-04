@@ -41,6 +41,46 @@ func (m *mockDispatcher) count() int {
 	return len(m.calls)
 }
 
+// mockNotifier captures the alerts the scheduler sends. The scheduler fires them
+// from a goroutine (see notifyRunFailure), so the tests wait on the channel instead
+// of reading a slice that may not be written yet.
+type mockNotifier struct {
+	alerts chan failureAlert
+}
+
+type failureAlert struct {
+	jobName, agentName, runID, errMsg string
+}
+
+func newMockNotifier() *mockNotifier {
+	return &mockNotifier{alerts: make(chan failureAlert, 8)}
+}
+
+func (m *mockNotifier) SendFailureAlert(jobName, agentName, runID, errMsg string) error {
+	m.alerts <- failureAlert{jobName, agentName, runID, errMsg}
+	return nil
+}
+
+func (m *mockNotifier) waitForAlert(t *testing.T) failureAlert {
+	t.Helper()
+	select {
+	case a := <-m.alerts:
+		return a
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected a failure alert, none was sent")
+		return failureAlert{}
+	}
+}
+
+func (m *mockNotifier) expectNoAlert(t *testing.T) {
+	t.Helper()
+	select {
+	case a := <-m.alerts:
+		t.Fatalf("unexpected alert: %+v", a)
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
 func TestScheduler_StartStop(t *testing.T) {
 	s := New(nil, &mockDispatcher{}, "")
 	s.Start()
@@ -343,6 +383,125 @@ func TestScanRetries_YieldsToRunningJob(t *testing.T) {
 		`SELECT COUNT(*) FROM backup_runs WHERE job_id=$1 AND status='running'`, job.ID))
 	assert.Equal(t, 1, running)
 	assert.Equal(t, manual.ID, latestRun(t, pool, job.ID))
+}
+
+// --- server-detected failures must reach the notifier ----------------------
+//
+// These cover the hole the dead-man's-switch work closed: everything the scheduler
+// decides on its own used to be written to backup_runs as `failed` and nothing else
+// happened, because the only email in the system came from an agent's `job_failed`
+// message. These are exactly the failures where no agent is in a position to report
+// anything.
+
+// A storage destination that cannot be decrypted (wrong or rotated ENCRYPTION_KEY,
+// corrupted row) stops the job before it is ever dispatched.
+func TestTriggerJob_NotifiesWhenSetupFails(t *testing.T) {
+	pool := testDB(t)
+	job := seedJob(t, pool, 0, defaultTestBackoff)
+
+	notifier := newMockNotifier()
+	disp := &mockDispatcher{}
+	// A different key: resolveStorage cannot decrypt the destination config.
+	s := New(pool, disp, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+	s.SetNotifier(notifier)
+
+	s.triggerJob(job, AttemptFirst)
+
+	assert.Zero(t, disp.count(), "nothing may be dispatched when setup failed")
+	alert := notifier.waitForAlert(t)
+	assert.Equal(t, job.Name, alert.jobName)
+	assert.Contains(t, alert.errMsg, "storage destination unavailable")
+	assert.NotEmpty(t, alert.runID, "the alert must point at the run row that was recorded")
+	assert.NotEqual(t, job.AgentID.String(), alert.agentName, "the agent name must be resolved, not its id")
+}
+
+// The commonest dispatch failure is "the agent is not connected", and it is the one
+// case where no agent will ever send a job_failed message.
+func TestTriggerJob_NotifiesWhenDispatchFails(t *testing.T) {
+	pool := testDB(t)
+	job := seedJob(t, pool, 0, defaultTestBackoff)
+
+	notifier := newMockNotifier()
+	disp := &mockDispatcher{err: errors.New("agent not connected")}
+	s := New(pool, disp, testEncKey)
+	s.SetNotifier(notifier)
+
+	s.triggerJob(job, AttemptFirst)
+
+	alert := notifier.waitForAlert(t)
+	assert.Equal(t, job.Name, alert.jobName)
+	assert.Contains(t, alert.errMsg, "agent not connected")
+
+	status, _, _ := runStatus(t, pool, latestRun(t, pool, job.ID))
+	assert.Equal(t, models.RunStatusFailed, status)
+}
+
+// An overlap skip must NOT notify: a job whose runs outlast their interval would
+// otherwise send one email per tick, which is the spam the dead-man's switch exists
+// to avoid. The consequence — no fresh successful backup — is reported once, by that
+// switch.
+func TestTriggerJob_DoesNotNotifyOnOverlapSkip(t *testing.T) {
+	pool := testDB(t)
+	job := seedJob(t, pool, 0, defaultTestBackoff)
+
+	_, err := BeginRun(pool, job.ID, AttemptFirst)
+	require.NoError(t, err)
+
+	notifier := newMockNotifier()
+	s := New(pool, &mockDispatcher{}, testEncKey)
+	s.SetNotifier(notifier)
+
+	s.triggerJob(job, AttemptFirst)
+	notifier.expectNoAlert(t)
+}
+
+func TestScheduler_WithoutNotifierStillRecordsTheFailure(t *testing.T) {
+	pool := testDB(t)
+	job := seedJob(t, pool, 0, defaultTestBackoff)
+
+	s := New(pool, &mockDispatcher{err: errors.New("boom")}, testEncKey)
+	s.triggerJob(job, AttemptFirst) // no notifier wired: must not panic
+
+	status, _, msg := runStatus(t, pool, latestRun(t, pool, job.ID))
+	assert.Equal(t, models.RunStatusFailed, status)
+	require.NotNil(t, msg)
+	assert.Contains(t, *msg, "boom")
+}
+
+// TestNextRuns exposes the scheduler's own cron entries, which is what the jobs list
+// reports as next_run.
+func TestNextRuns(t *testing.T) {
+	s := New(nil, &mockDispatcher{}, "")
+	job := models.BackupJob{ID: uuid.New(), Enabled: true, ScheduleCron: "0 3 * * *"}
+	require.NoError(t, s.AddJob(job))
+
+	// Before Start the cron has computed nothing, so there is no honest answer.
+	assert.Empty(t, s.NextRuns(), "an unstarted scheduler must not invent a next run")
+
+	s.Start()
+	defer s.Stop()
+
+	next, ok := s.NextRuns()[job.ID.String()]
+	require.True(t, ok, "a loaded job must report its next execution")
+	assert.True(t, next.After(time.Now()), "next_run must be in the future")
+	assert.Equal(t, 3, next.Hour())
+
+	// A removed job has no entry and therefore no next run — which is the whole
+	// reason this comes from the scheduler instead of from re-parsing the cron.
+	s.RemoveJob(job.ID.String())
+	assert.Empty(t, s.NextRuns())
+}
+
+// A disabled job is never added to cron, so it must not report a next execution the
+// server has no intention of honouring.
+func TestNextRuns_DisabledJobHasNone(t *testing.T) {
+	s := New(nil, &mockDispatcher{}, "")
+	s.Start()
+	defer s.Stop()
+
+	job := models.BackupJob{ID: uuid.New(), Enabled: false, ScheduleCron: "0 3 * * *"}
+	require.NoError(t, s.AddJob(job))
+	assert.Empty(t, s.NextRuns())
 }
 
 func latestRun(t *testing.T, pool *sqlx.DB, jobID uuid.UUID) uuid.UUID {

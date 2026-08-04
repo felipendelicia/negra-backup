@@ -87,9 +87,21 @@ func main() {
 	retention.StartDailySchedule()
 
 	sched := scheduler.New(pool, hub, cfg.EncryptionKey)
+	// The same notifier for failures the SERVER detects. Until this line the only
+	// alert in the system came from an agent's `job_failed` message, so an offline
+	// agent, an unreadable storage destination or an undecryptable passphrase became
+	// a `failed` run that nobody was told about.
+	sched.SetNotifier(notifier)
 	srv.SetScheduler(sched)
 	sched.Start()
 	defer sched.Stop()
+
+	// The dead-man's switch: the half of the problem no run-level notification can
+	// reach. A backup that fails sends an email; a backup that never runs sends
+	// nothing at all, and that silence is what this watches for.
+	deadman := notify.NewDeadManSwitch(pool, notifier, notify.DeadManConfigFromEnv())
+	deadman.Start()
+	defer deadman.Stop()
 
 	addr := ":" + cfg.Port
 	httpSrv := &http.Server{

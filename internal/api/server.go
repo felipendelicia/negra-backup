@@ -19,6 +19,18 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// jobScheduler is the slice of *scheduler.Scheduler the HTTP layer depends on.
+//
+// NextRuns was added alongside the health fields on GET /api/jobs: the next
+// execution is read out of the scheduler's live cron entries instead of being
+// recomputed from schedule_cron, so the API reports what the server will actually
+// do rather than what the expression says it ought to.
+type jobScheduler interface {
+	AddJob(job models.BackupJob) error
+	RemoveJob(jobID string)
+	NextRuns() map[string]time.Time
+}
+
 type Server struct {
 	router     chi.Router
 	db         *sqlx.DB
@@ -26,19 +38,13 @@ type Server struct {
 	hub        *ws.Hub
 	wsHandler  *ws.AgentHandler
 	consoleHub *ConsoleHub
-	sched      interface {
-		AddJob(job models.BackupJob) error
-		RemoveJob(jobID string)
-	}
+	sched      jobScheduler
 }
 
 // ConsoleHub returns the server's log broadcast hub so callers can wire log.SetOutput.
 func (s *Server) GetConsoleHub() *ConsoleHub { return s.consoleHub }
 
-func (s *Server) SetScheduler(sched interface {
-	AddJob(job models.BackupJob) error
-	RemoveJob(jobID string)
-}) {
+func (s *Server) SetScheduler(sched jobScheduler) {
 	s.sched = sched
 }
 
@@ -206,6 +212,10 @@ func (s *Server) buildRouter() chi.Router {
 		r.Put("/api/storage-destinations/{id}", s.handleUpdateStorage)
 		r.Delete("/api/storage-destinations/{id}", s.handleDeleteStorage)
 
+		// The aggregate "is everything backed up and up to date" view: per-agent
+		// state plus whatever the dead-man's switch currently holds open.
+		r.Get("/api/health", s.handleHealthSummary)
+
 		r.Get("/api/jobs", s.handleListJobs)
 		r.Post("/api/jobs", s.handleCreateJob)
 		r.Put("/api/jobs/{id}", s.handleUpdateJob)
@@ -218,6 +228,10 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/api/runs/{id}/cancel", s.handleCancelRun)
 		r.Get("/api/runs/{id}/logs", s.handleRunLogs)
 		r.Get("/api/runs/{id}/logs/ws", s.handleRunLogsWS)
+		// Restore is anchored to a run: the job may have been edited or repointed
+		// since the archive was written, but the run records where it actually went.
+		r.Get("/api/runs/{id}/archive", s.handleListArchive)
+		r.Post("/api/runs/{id}/restore", s.handleStartRestore)
 
 		r.Get("/api/settings/notifications", s.handleGetNotificationSettings)
 		r.Put("/api/settings/notifications", s.handleUpdateNotificationSettings)

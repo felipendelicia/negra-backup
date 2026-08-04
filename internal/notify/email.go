@@ -28,6 +28,13 @@ func (e *EmailSender) SendFailureAlert(jobName, agentName, runID, errMsg string)
 	return e.send(subject, body)
 }
 
+// SendAlert delivers a pre-composed message. The dead-man's switch reports things
+// that did NOT happen, so it has no run to describe and cannot use the
+// SendFailureAlert signature; it builds its own subject and body instead.
+func (e *EmailSender) SendAlert(subject, body string) error {
+	return e.send(subject, body)
+}
+
 // sanitizeHeader removes CR and LF to prevent email header injection.
 func sanitizeHeader(s string) string {
 	s = strings.ReplaceAll(s, "\r", "")
