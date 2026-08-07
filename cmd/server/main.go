@@ -71,6 +71,9 @@ func main() {
 		log.Printf("marked %d stale running runs as failed", n)
 	}
 
+	// Stamped into nat_backup_build_info so a scrape says which build produced it.
+	api.Version = version
+
 	srv, hub, agentHandler := api.NewServerWithStatic(pool, cfg)
 
 	// Tee log output to the browser console hub

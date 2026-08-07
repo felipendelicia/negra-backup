@@ -18,6 +18,13 @@ type Config struct {
 	TLSCertFile   string
 	TLSKeyFile    string
 	UploadDir     string
+
+	// MetricsToken is the bearer token a Prometheus scraper must present on
+	// /metrics. Empty disables the endpoint entirely rather than serving it open:
+	// the exposition names every job, every agent and when each last succeeded,
+	// which is a map of what to attack and when nobody is watching. One knob, and
+	// the safe value is the one you get by doing nothing.
+	MetricsToken string
 }
 
 func Load() (Config, error) {
@@ -47,6 +54,7 @@ func Load() (Config, error) {
 		UploadDir:     getOr("UPLOAD_DIR", "./data/uploads"),
 		TLSCertFile:   os.Getenv("TLS_CERT_FILE"),
 		TLSKeyFile:    os.Getenv("TLS_KEY_FILE"),
+		MetricsToken:  os.Getenv("METRICS_TOKEN"),
 	}
 
 	if v := os.Getenv("TLS_ENABLED"); v != "" {

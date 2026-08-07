@@ -170,6 +170,65 @@ type EmailNotificationConfig struct {
 	Password string   `json:"password,omitempty"`
 }
 
+// Notification channel types, matching notification_settings.type.
+const (
+	NotificationTypeEmail   = "email"
+	NotificationTypeWebhook = "webhook"
+)
+
+// Webhook payload formats. The differences between these services are a URL and the
+// shape of one JSON object, so they are a field rather than four integrations.
+const (
+	WebhookFormatGeneric  = "generic"
+	WebhookFormatSlack    = "slack"
+	WebhookFormatDiscord  = "discord"
+	WebhookFormatTelegram = "telegram"
+	WebhookFormatNtfy     = "ntfy"
+)
+
+// WebhookFormats lists every accepted value of WebhookNotificationConfig.Format.
+var WebhookFormats = []string{
+	WebhookFormatGeneric,
+	WebhookFormatSlack,
+	WebhookFormatDiscord,
+	WebhookFormatTelegram,
+	WebhookFormatNtfy,
+}
+
+// ValidWebhookFormat reports whether f is a format the sender knows how to encode.
+// An unknown format must be rejected at the API rather than defaulted, or an
+// operator configures Slack, gets the generic payload, sees Slack accept it with a
+// 200 and never learns that no message was posted.
+func ValidWebhookFormat(f string) bool {
+	for _, known := range WebhookFormats {
+		if f == known {
+			return true
+		}
+	}
+	return false
+}
+
+// WebhookNotificationConfig is the second alert channel, next to SMTP.
+//
+// It exists because the typical install has no mail server: the SMTP form starts
+// empty and is optional, so the dead-man's switch has nowhere to deliver and the
+// whole alerting story silently amounts to nothing. A URL is something a self-hosted
+// operator already has.
+//
+// The URL is a credential, not an address. A Slack or Discord incoming webhook, and a
+// Telegram bot endpoint, all carry their secret inside the path — anyone holding the
+// URL can post as you. It is therefore encrypted at rest like every other secret here
+// and never returned to the browser in full (see internal/api/settings.go).
+type WebhookNotificationConfig struct {
+	URL    string `json:"url"`
+	Format string `json:"format"`
+	// AuthHeader is sent verbatim as the Authorization header when set. Covers ntfy
+	// access tokens and generic endpoints behind a bearer or basic credential.
+	AuthHeader string `json:"auth_header,omitempty"`
+	// ChatID is the Telegram destination. Ignored by every other format.
+	ChatID string `json:"chat_id,omitempty"`
+}
+
 // APIKeyPrefix marks keys that carry a public identifier. Keys issued before this
 // scheme have no prefix and authenticate through the legacy full-table scan.
 const APIKeyPrefix = "natb_"

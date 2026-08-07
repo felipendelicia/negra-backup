@@ -175,9 +175,21 @@ func (s *Server) buildRouter() chi.Router {
 	r.Use(middleware.RequestID)
 	r.Use(limitBody)
 
+	// Liveness: this process is up. It must NOT check the database — see the note on
+	// handleReadyz for why a liveness probe that fails on a dependency outage turns
+	// that outage into a crash loop.
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+
+	// Readiness: the database really answers. Unauthenticated on purpose — it
+	// reveals nothing beyond up/down and is polled by infrastructure that has no
+	// credentials.
+	r.Get("/readyz", s.handleReadyz)
+
+	// Prometheus. The handler rejects everything unless METRICS_TOKEN is configured,
+	// so registering the route unconditionally does not expose anything.
+	r.Get("/metrics", s.handleMetrics)
 
 	// WebSocket for agents (auth via hello message)
 	r.Get("/ws/agent", s.wsHandler.ServeHTTP)

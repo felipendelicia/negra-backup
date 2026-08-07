@@ -2,7 +2,7 @@ import { getToken, clearToken } from './auth'
 import type {
   Agent, BackupJob, BackupRun, StorageDestination,
   NotificationSettings, CreateJobRequest, CreateStorageRequest,
-  EmailNotificationConfig, RunsPage, RunsQuery, RunLogs, RunStats,
+  RunsPage, RunsQuery, RunLogs, RunStats,
   JobListItem, HealthSummary, ArchiveListing, RestoreRequest, RestoreAccepted,
 } from './types'
 
@@ -123,7 +123,11 @@ export const api = {
     request<RestoreAccepted>('POST', `/api/runs/${id}/restore`, body),
 
   getNotificationSettings: (signal?: AbortSignal) =>
-    request<NotificationSettings | { configured: false }>('GET', '/api/settings/notifications', undefined, signal),
-  updateNotificationSettings: (data: { type: string; config: EmailNotificationConfig }) =>
+    request<NotificationSettings>('GET', '/api/settings/notifications', undefined, signal),
+  /**
+   * Replaces the whole set of channels. Both keys must be sent on every save:
+   * an omitted channel is removed, which is how a webhook gets deleted.
+   */
+  updateNotificationSettings: (data: NotificationSettings) =>
     request<void>('PUT', '/api/settings/notifications', data),
 }

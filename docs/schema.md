@@ -12,6 +12,7 @@ Applied migrations:
 | `002_storage_config_text.up.sql` | `storage_destinations.config` **and** `notification_settings.config` JSONB → TEXT |
 | `004_job_retries.up.sql` | Retry policy on `backup_jobs`, attempt counter on `backup_runs`, and the partial unique index that allows one running run per job |
 | `006_alert_state.up.sql` | `alert_state`: the open-alert memory of the dead-man's switch, so an outage produces a handful of emails instead of one per check |
+| `007_notification_channels.up.sql` | UNIQUE index on `notification_settings.type`, so email and webhook can be configured side by side instead of overwriting each other |
 
 This document mirrors the DDL. Every column below is taken from the migration
 files; the "written values" notes cite the Go code that produces them.
@@ -207,16 +208,23 @@ concurrent run.
 | Column | Type | Null | Default | Notes |
 |--------|------|------|---------|-------|
 | `id` | UUID | NOT NULL | `uuid_generate_v4()` | PRIMARY KEY |
-| `type` | TEXT | NOT NULL | `'email'` | Only `email` is implemented |
-| `config` | TEXT | NOT NULL | `'{}'` | JSONB in 001, TEXT after 002. **Stored in plaintext** |
+| `type` | TEXT | NOT NULL | `'email'` | `email` or `webhook` (`internal/models`). UNIQUE since migration 007 |
+| `config` | TEXT | NOT NULL | `'{}'` | AES-256-GCM ciphertext, base64-encoded. JSONB in 001, TEXT after 002 |
 
-`config` is **not** encrypted: `internal/api/settings.go` inserts the raw JSON and
-`internal/notify/provider.go` unmarshals it directly, so the SMTP password sits in
-the database in the clear.
+`config` is encrypted by `internal/api/settings.go` before insert and decrypted by
+`notify.DecryptSettingsConfig`, which also accepts a plaintext JSON object so rows
+written before encryption existed keep working (they are re-encrypted on the next
+save).
 
-There is no UNIQUE constraint on `type`, but at most one row exists in practice:
-`PUT /api/settings/notifications` runs `DELETE FROM notification_settings` followed
-by a single INSERT inside one transaction.
+**One row per channel**, enforced by `idx_notification_settings_type` (migration
+007). Before that the update handler ran `DELETE FROM notification_settings`
+followed by a single INSERT, so configuring one channel destroyed the other;
+`PUT /api/settings/notifications` now upserts per type and deletes the channels the
+request omits.
+
+Alerts are delivered to **every** configured channel — `notify.DBNotifier.fanOut`
+attempts all of them and joins the errors, so a dead SMTP server does not suppress
+the webhook.
 
 Email config shape (`models.EmailNotificationConfig`):
 
@@ -229,6 +237,20 @@ Email config shape (`models.EmailNotificationConfig`):
   "tls": true,
   "username": "...",
   "password": "..."
+}
+```
+
+Webhook config shape (`models.WebhookNotificationConfig`):
+
+```jsonc
+{
+  // For slack, discord and telegram the URL IS the credential — the token lives
+  // in the path. Never returned to the browser; reads get "__stored__" plus a
+  // "url_preview" of scheme://host.
+  "url": "https://hooks.slack.com/services/T000/B000/XXXX",
+  "format": "generic",        // generic | slack | discord | telegram | ntfy
+  "auth_header": "Bearer ...", // optional; sent as the Authorization header
+  "chat_id": "-1001234567890"  // telegram only, required for that format
 }
 ```
 

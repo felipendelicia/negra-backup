@@ -272,11 +272,36 @@ export interface EmailNotificationConfig {
   password?: string
 }
 
-export interface NotificationSettings {
-  id: string
-  type: 'email'
-  config: EmailNotificationConfig
+export const WEBHOOK_FORMATS = ['generic', 'slack', 'discord', 'telegram', 'ntfy'] as const
+export type WebhookFormat = (typeof WEBHOOK_FORMATS)[number]
+
+export interface WebhookNotificationConfig {
+  /**
+   * For Slack, Discord and Telegram the URL *is* the credential, so the server
+   * never returns it. Reads come back as the `__stored__` sentinel; submitting
+   * the sentinel keeps whatever is stored.
+   */
+  url: string
+  format: WebhookFormat
+  /** Sent verbatim as the Authorization header. Redacted on read, like `url`. */
+  auth_header?: string
+  /** Telegram only; ignored by every other format. */
+  chat_id?: string
+  /** Read-only: scheme + host of the stored URL, for display. Never submitted. */
+  url_preview?: string
 }
+
+/**
+ * Both the GET response and the PUT body. The PUT replaces the whole set, so a
+ * null channel removes it — that is the only way to express "delete my webhook".
+ */
+export interface NotificationSettings {
+  email: EmailNotificationConfig | null
+  webhook: WebhookNotificationConfig | null
+}
+
+/** Echoed back in place of a stored secret; means "keep the existing value". */
+export const STORED_SECRET_SENTINEL = '__stored__'
 
 export interface CreateJobRequest {
   agent_id: string
