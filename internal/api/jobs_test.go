@@ -11,7 +11,7 @@ import (
 )
 
 func TestListJobs_NoAuth(t *testing.T) {
-	srv, _ := api.NewServer(nil, testConfig())
+	srv, _, _ := api.NewServer(nil, testConfig())
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)

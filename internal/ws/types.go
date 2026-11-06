@@ -14,7 +14,7 @@ const (
 
 // AgentMessage is sent from agent to server.
 type AgentMessage struct {
-	Type        string `json:"type"`
+	Type        string `json:"type,omitempty"`
 	APIKey      string `json:"api_key,omitempty"`
 	OS          string `json:"os,omitempty"`
 	Arch        string `json:"arch,omitempty"`
